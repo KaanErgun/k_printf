@@ -1,87 +1,197 @@
 # k_printf
 
-🔧 Lightweight `printf` implementation for MSP430 microcontrollers.  
-🎯 Designed for low-memory embedded systems — no `malloc`, no `vsnprintf`, no problem.
+🔧 Lightweight, freestanding `printf` for MSP430 and other small microcontrollers.
+🎯 No `malloc`, no libc `printf`, no format buffer required — output goes one byte
+at a time through a callback you supply.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-MSP430-blue)
 ![Language](https://img.shields.io/badge/language-C-lightgrey)
+![Version](https://img.shields.io/badge/version-2.0.0-orange)
+
+> This is the canonical README. A Turkish summary lives in
+> [docs/README.tr.md](docs/README.tr.md) (may lag behind this file).
 
 ---
 
 ## ✨ Features
 
-- Supports format specifiers: `%d`, `%u`, `%x`, `%c`, `%s`
-- No dynamic memory usage
-- Easy to integrate: works with any `putc()` function
-- Tiny code size, ideal for MSP430 projects
+- Specifiers: `d i u x X o b B c s p %` plus the `%%` literal
+- **`long` support** via the `l` modifier (`%ld %lu %lx %lX %lo %lb`) — essential
+  on MSP430, where `int` is only 16-bit
+- Field **width**, **precision**, and flags `-` `+` `space` `0` `#`, plus `*`
+  (width/precision from an argument)
+- Returns the number of characters written (like standard `printf`)
+- `k_snprintf` / `k_vsnprintf` for formatting into a buffer
+- Multiple output sinks via an explicit sink handle + `userdata`
+- Reentrant core (`k_vprintf_cb`) with no global state
+- Per-specifier compile switches to trim code size
+- No dynamic memory; C11; `extern "C"` for C++
 
 ---
 
-## 🚀 Quick Start
-
-### 🧩 Step 1: Initialize with your output function
+## 🚀 Quick start
 
 ```c
-void uart_putc(char c) {
-    while (!(IFG2 & UCA0TXIFG));
-    UCA0TXBUF = c;
+#include <msp430.h>
+#include "k_printf.h"
+
+/* v2.0 callback signature: (char, void *userdata) */
+static void uart_putc(char c, void *userdata) {
+    (void)userdata;
+    while (!(IFG2 & UCA0TXIFG)) { }
+    UCA0TXBUF = (unsigned char)c;
 }
 
-k_printf_init(uart_putc);
-```
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;
+    k_printf_init(uart_putc, NULL);
 
-### 🖨️ Step 2: Print formatted text
-
-```c
-k_printf("Hello, %s! Value: %d (0x%x)\n", "world", 42, 42);
+    k_printf("Value: %d (hex %#x)\n", 42, 42);      // Value: 42 (hex 0x2a)
+    k_printf("Tick: %lu\n", 1000000UL);             // needs %l — 32-bit
+    k_printf("Port: %08b\n", 0xA5);                 // Port: 10100101
+}
 ```
 
 ---
 
-## 🧪 Supported Format Specifiers
+## 🧪 Supported format specifiers
 
-| Specifier | Meaning           | Example Output |
-|-----------|-------------------|----------------|
-| `%d`      | Signed decimal    | `-123`         |
-| `%u`      | Unsigned decimal  | `123`          |
-| `%x`      | Hexadecimal       | `0x7b`         |
-| `%c`      | Character          | `A`            |
-| `%s`      | String             | `Hello`        |
+Grammar: `%[flags][width][.precision][l]specifier`
+
+| Specifier | Argument type | Meaning | Example |
+|-----------|---------------|---------|---------|
+| `%d`, `%i` | `int` | Signed decimal (INT_MIN-safe) | `-123` |
+| `%u` | `unsigned int` | Unsigned decimal | `123` |
+| `%x` / `%X` | `unsigned int` | Hex, lower/upper, **no prefix** | `2a` / `2A` |
+| `%o` | `unsigned int` | Octal | `52` |
+| `%b` / `%B` | `unsigned int` | Binary (MSB first) | `101010` |
+| `%c` | `int` | Single character | `A` |
+| `%s` | `const char *` | String (`NULL` → `(null)`) | `hi` |
+| `%p` | `void *` | Pointer, `0x`-prefixed hex | `0x1a2b` |
+| `%%` | — | A literal `%` | `%` |
+| `%ld %lu %lx %lX %lo %lb` | `long` / `unsigned long` | **32-bit** variants | `4000000000` |
+
+**Flags:** `-` left-justify · `+` always show sign · `space` blank before positives ·
+`0` zero-pad · `#` alternate form (`0x`/`0X` for hex, `0b`/`0B` for binary, leading `0` for octal).
+
+**Width / precision:** `%8d`, `%-8s`, `%08x`, `%.3d`, `%10.5s`, and `*` for a
+run-time value: `%*d`, `%-*.*d`.
+
+> **Note:** plain `%x` no longer prints a `0x` prefix (v1 did). Use `%#x` for the
+> prefix. See [Migration](#-migrating-from-1x).
 
 ---
 
-## 📁 Project Structure
+## ⚠️ Limitations
 
-```
-k_printf/
-├── include/       # Public header
-├── src/           # Core implementation
-├── examples/      # Sample usage for MSP430
-├── LICENSE
-├── README.md
-└── Makefile
-```
+- **16-bit ranges** without `l`: `%d` is −32768..32767, `%u` is 0..65535, `%x` is
+  up to 4 nibbles. Use `%ld`/`%lu`/`%lx` for 32-bit values on MSP430.
+- No floating point (`%f`, `%e`, `%g`), no `%n`.
+- An **unknown specifier is echoed literally** (e.g. `%q` → `%q`) and does **not**
+  consume an argument.
+- A lone trailing `%` at the end of the format string is dropped.
+- The `putc` callback must block until the byte is accepted.
+- The core is reentrant, but character-by-character output to a shared device is
+  **not atomic**: calling `k_printf` from both an ISR and the main context can
+  interleave bytes. Serialize access yourself (e.g. an interrupt-driven TX ring
+  buffer) if you need that.
 
 ---
 
 ## 🛠️ Building
 
 ```bash
-make
+make lib                       # -> libk_printf.a (MSP430, msp430-gcc)
+make example                   # -> example.elf
+make MCU=msp430fr5969 lib      # different device
+make test                      # host build + run the test suite
+make install PREFIX=/usr/local # install lib + header
 ```
 
-You can modify `CFLAGS` and `MCU` in the `Makefile` to suit your device.
+With CMake:
+
+```bash
+# Host tests
+cmake -S . -B build -DK_PRINTF_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
+
+# MSP430 cross-build
+cmake -S . -B bcross -DCMAKE_TOOLCHAIN_FILE=cmake/msp430-toolchain.cmake \
+      -DK_PRINTF_BUILD_EXAMPLES=ON -DMSP430_MCU=msp430g2553
+cmake --build bcross
+```
+
+### Trimming code size
+
+Every optional specifier group can be disabled at compile time; a disabled one is
+echoed literally and consumes no argument:
+
+```bash
+gcc -Iinclude -DK_PRINTF_ENABLE_BIN=0 -DK_PRINTF_ENABLE_PTR=0 -c src/k_printf.c
+```
+
+Switches: `K_PRINTF_ENABLE_LONG`, `_HEX`, `_OCTAL`, `_BIN`, `_PTR` (all default `1`).
+The `d i u c s %%` core is always built.
+
+---
+
+## 🔌 Beyond the global sink
+
+```c
+/* Format into a buffer */
+char line[32];
+int n = k_snprintf(line, sizeof line, "%s=%ld", "count", 100000L);
+
+/* Independent sinks (e.g. UART and an in-RAM log) */
+k_printf_sink_t uart = { uart_putc, NULL };
+k_printf_sink_t ring = { ring_putc, &my_ringbuf };
+k_fprintf(&uart, "hello %d\n", 1);
+k_fprintf(&ring, "hello %d\n", 1);
+
+/* Build your own printf-like wrapper on the reentrant core */
+int log_printf(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    int r = k_vprintf_cb(uart_putc, NULL, fmt, ap);
+    va_end(ap);
+    return r;
+}
+```
+
+---
+
+## 🔀 Migrating from 1.x
+
+v2.0 is a breaking release. Two behaviour changes and one API change:
+
+| Change | 1.x | 2.0 | Action |
+|--------|-----|-----|--------|
+| `putc` callback | `void f(char)` | `void f(char, void *userdata)` | Add the `userdata` param |
+| `k_printf_init` | `init(f)` | `init(f, userdata)` | Pass `NULL` if unused |
+| `%x` prefix | printed `0x` | no prefix | Use `%#x` where you relied on `0x` |
+| `%%` | printed `%%` | prints `%` | Remove workarounds that used a single `%` |
+| Return type | `void` | `int` (chars written) | Optional: check the count |
+
+Everything else (`%d %u %c %s`, plain literals) is source-compatible.
+
+---
+
+## 🧪 Testing
+
+`make test` builds a host harness ([tests/test_k_printf.c](tests/test_k_printf.c))
+that formats each case with both `k_printf` and the platform `snprintf` and
+asserts equality, under `-fsanitize=address,undefined`. It covers every v1 bug
+(INT_MIN, trailing `%`, `%%`, NULL `%s`, unknown specifier) plus the new
+width/precision/flag/long paths.
+
+> **16 vs 32-bit caveat:** the host `int` is 32-bit, so the harness exercises the
+> INT_MIN negation path with the *host* `INT_MIN`, not MSP430's −32768. Validate
+> true 16-bit behaviour on an MSP430 simulator (mspdebug `simu` / QEMU) capturing
+> UART bytes.
 
 ---
 
 ## 📜 License
 
-MIT © [Kaan Ergun](https://github.com/KaanErgun)
+MIT © [KaanErgun](https://github.com/KaanErgun) — see [LICENSE](LICENSE).
 
----
-
-## 💡 Why k_printf?
-
-Because embedded systems deserve beautiful debugging too —  
-without the cost of the kitchen sink.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
