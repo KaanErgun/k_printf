@@ -9,6 +9,10 @@ build/
 /cmake-build-*/
 /CMakeCache.txt
 /CMakeFiles/
+build-cmake/
+
+# Generated docs
+docs/doxygen/
 
 # Editor / OS
 .DS_Store

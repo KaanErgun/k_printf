@@ -6,8 +6,8 @@ set(CMAKE_SYSTEM_PROCESSOR msp430)
 
 set(MSP430_MCU "msp430g2553" CACHE STRING "Target MSP430 device")
 
-find_program(MSP430_GCC msp430-gcc)
-find_program(MSP430_AR  msp430-ar)
+find_program(MSP430_GCC NAMES msp430-elf-gcc msp430-gcc)
+find_program(MSP430_AR  NAMES msp430-elf-ar  msp430-ar)
 
 set(CMAKE_C_COMPILER "${MSP430_GCC}")
 set(CMAKE_AR         "${MSP430_AR}")

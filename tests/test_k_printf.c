@@ -56,7 +56,20 @@ static void run(const char *label, const char *got, const char *exp) {
     run("k_printf(" #__VA_ARGS__ ")", out, exp);              \
 } while (0)
 
+/* Override the weak no-op lock hooks to prove the global path calls them,
+ * balanced, once per call. */
+static int locks, unlocks;
+void k_printf_lock(void)   { locks++; }
+void k_printf_unlock(void) { unlocks++; }
+
 int main(void) {
+    /* ---- Before init: NULL global sink must fail, not crash (2.6) ---- */
+    run("uninitialized k_printf returns err",
+        k_printf("boot %d", 1) == K_PRINTF_ERR ? "err" : "ok", "err");
+    k_printf_init(NULL, NULL);   /* NULL putc must be rejected... */
+    run("init(NULL) keeps sink unset",
+        k_printf("x") == K_PRINTF_ERR ? "err" : "ok", "err");
+
     k_printf_init(tputc, NULL);
 
     /* ---- Regression tests for the v1 bugs ---- */
@@ -117,7 +130,10 @@ int main(void) {
     CHECK_REF("[%+05d]", 42);
     CHECK_REF("[%8.3d]", 5);
     CHECK_REF("[%-8.3d]", 5);
-    CHECK_REF("[%05.3d]", 42);
+    /* literal oracle: gcc -Wformat rejects "%05.3d" under -Werror (the '0'
+     * flag is ignored when a precision is given - which is exactly the
+     * defined behaviour being pinned here: space-pad, zero-fill to .3) */
+    CHECK("[  042]", "[%05.3d]", 42);
     CHECK_REF("[%.0d]", 0);
     CHECK_REF("[%3.0d]", 0);
     CHECK_REF("[%*d]", 6, 42);
@@ -142,6 +158,9 @@ int main(void) {
     /* ---- octal alternate form ---- */
     CHECK_REF("%#o", 64u);
     CHECK_REF("%#o", 0u);
+    CHECK_REF("%#.0o", 0u);   /* C11 7.21.6.1: still a single "0" */
+    CHECK_REF("%#.1o", 8u);   /* precision too small -> forced leading 0 */
+    CHECK_REF("%#.5o", 7u);   /* precision already forces the leading 0 */
 
     /* ---- binary (%b): no snprintf oracle, use literals ---- */
     CHECK("10100101", "%b", 0xA5u);
@@ -149,6 +168,52 @@ int main(void) {
     CHECK("0b1111", "%#b", 0x0Fu);
     CHECK("0", "%b", 0u);
     CHECK("11111111111111111111111111111111", "%lb", 0xFFFFFFFFUL);
+
+    /* ---- 16-bit-range vectors (MSP430 int semantics, exercised on host) ----
+     * Host int is 32-bit, so these do NOT prove the 16-bit INT_MIN negation
+     * path; they pin the expected *output* for every 16-bit boundary value.
+     * True 16-bit behaviour needs an MSP430 simulator (see README). */
+    CHECK("-32768", "%d", (int)INT16_MIN);
+    CHECK("32767",  "%d", (int)INT16_MAX);
+    CHECK("65535",  "%u", (unsigned)UINT16_MAX);
+    CHECK("ffff",   "%x", (unsigned)UINT16_MAX);
+    CHECK("FFFF",   "%X", (unsigned)UINT16_MAX);
+    CHECK("-32768", "%ld", (long)INT16_MIN);
+    CHECK_REF("[%06d]", (int)INT16_MIN);
+    CHECK_REF("[%#06x]", (unsigned)UINT16_MAX);
+
+    /* ---- %p: fixed representation (0x-prefixed lowercase hex; 0 for NULL) */
+    CHECK("0x1a2b", "%p", (void *)(uintptr_t)0x1A2Bu);
+    CHECK("0", "%p", (void *)0);
+
+    /* ---- h/hh parsed and ignored (harmless: int promotion) ---- */
+    CHECK_REF("[%hd]", -42);
+    CHECK_REF("[%hhu]", 200);
+
+    /* ---- '*' with negative width / negative precision ---- */
+    CHECK_REF("[%*d]", -6, 42);      /* negative width -> left-justify */
+    CHECK_REF("[%.*d]", -3, 42);     /* negative precision -> none */
+    CHECK_REF("[%*.*s]", -8, 3, "hello");
+
+    /* ---- long + width/flags combinations ---- */
+    CHECK_REF("[%12ld]", -123456789L);
+    CHECK_REF("[%-12lu]", 4000000000UL);
+    CHECK_REF("[%+ld]", 2147483647L);
+    CHECK_REF("[%016lX]", 0xDEADBEEFUL);
+
+    /* ---- NULL %s combined with precision ---- */
+    CHECK("(nul", "%.4s", (char *)NULL);
+
+    /* ---- lock hooks: called once per global-path call, balanced ---- */
+    {
+        int l0 = locks, u0 = unlocks;
+        k_printf("locked?");
+        run("lock called once", (locks == l0 + 1) ? "1" : "?", "1");
+        run("unlock called once", (unlocks == u0 + 1) ? "1" : "?", "1");
+        char b[8];
+        k_snprintf(b, sizeof b, "%d", 1);   /* snprintf path: no locking */
+        run("snprintf path takes no lock", (locks == l0 + 1) ? "1" : "?", "1");
+    }
 
     /* ---- return value = chars written ---- */
     run("return value counts chars",

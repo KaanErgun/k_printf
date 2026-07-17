@@ -1,0 +1,18 @@
+# Minimal Doxygen config for the k_printf public API.
+# Run from this directory:  doxygen Doxyfile   -> docs/doxygen/html/
+PROJECT_NAME           = k_printf
+PROJECT_NUMBER         = 2.0.0
+PROJECT_BRIEF          = "Lightweight, freestanding printf for MSP430 and other small MCUs"
+
+INPUT                  = ../include ../README.md
+USE_MDFILE_AS_MAINPAGE = ../README.md
+OUTPUT_DIRECTORY       = doxygen
+
+OPTIMIZE_OUTPUT_FOR_C  = YES
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+JAVADOC_AUTOBRIEF      = YES
+QUIET                  = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO

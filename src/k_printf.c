@@ -4,6 +4,10 @@
  */
 #include "k_printf.h"
 #include <stdint.h>   /* uintptr_t (for %p) */
+#include <limits.h>   /* CHAR_BIT (digit buffer sizing) */
+
+_Static_assert(sizeof(unsigned long) * CHAR_BIT >= 32,
+               "k_printf promises 32-bit output via %l on every target");
 
 /* ---- Compile-time feature switches (opt-in via -D...=0 to shrink ROM) --- */
 /* The d/i/u/c/s/%% core is always built. The rest can be dropped. When a
@@ -52,23 +56,27 @@ static void emit_pad(k_out_t *o, char c, int n) {
 /*
  * Formats one unsigned magnitude `uv` in `base` with printf-style width,
  * precision and flags. `neg` requests a leading '-'. `upper` selects
- * uppercase hex/binary digits. A tmp buffer big enough for base-2 of a
- * 64-bit host `unsigned long` (worst case).
+ * uppercase hex/binary digits. The tmp buffer is sized from the type: worst
+ * case is base 2, one digit per bit of `unsigned long`.
  */
 static void fmt_int(k_out_t *o, unsigned long uv, unsigned base, int upper,
                     int neg, unsigned flags, int width, int precision) {
     static const char lower[] = "0123456789abcdef";
     static const char upperd[] = "0123456789ABCDEF";
     const char *digits = upper ? upperd : lower;
-    char tmp[72];
+    char tmp[sizeof(unsigned long) * CHAR_BIT];
     int ndigits = 0;
     int is_zero = (uv == 0UL);
 
     /* precision 0 with value 0 => no digits at all */
     if (!(precision == 0 && is_zero)) {
+        /* One division per digit: derive the remainder from the quotient so
+         * targets without hardware divide (MSP430) call the software divide
+         * helper once, not twice, per digit. */
         do {
-            tmp[ndigits++] = digits[uv % base];
-            uv /= base;
+            unsigned long q = uv / base;
+            tmp[ndigits++] = digits[(unsigned)(uv - q * base)];
+            uv = q;
         } while (uv != 0UL);
     }
 
@@ -84,14 +92,21 @@ static void fmt_int(k_out_t *o, unsigned long uv, unsigned base, int upper,
     /* alternate-form prefix from '#' */
     char pfx0 = 0, pfx1 = 0;
     int plen = 0;
-    if ((flags & FLAG_HASH) && !is_zero) {
-        if (base == 16) { pfx0 = '0'; pfx1 = upper ? 'X' : 'x'; plen = 2; }
-        else if (base == 2) { pfx0 = '0'; pfx1 = upper ? 'B' : 'b'; plen = 2; }
-        else if (base == 8) { if (lead_zeros == 0) lead_zeros = 1; } /* force leading 0 */
+    if (flags & FLAG_HASH) {
+        if (base == 16 && !is_zero) { pfx0 = '0'; pfx1 = upper ? 'X' : 'x'; plen = 2; }
+        else if (base == 2 && !is_zero) { pfx0 = '0'; pfx1 = upper ? 'B' : 'b'; plen = 2; }
+        else if (base == 8) {
+            /* Force a leading zero unless one is already first (C11 7.21.6.1:
+             * "%#.0o" of 0 still prints a single "0"). */
+            if (lead_zeros == 0 && !(ndigits > 0 && tmp[ndigits - 1] == '0'))
+                lead_zeros = 1;
+        }
     }
 
-    int sign_len = sign ? 1 : 0;
-    int body = sign_len + plen + lead_zeros + ndigits;
+    /* fixed part is tiny (sign+prefix+digits); only lead_zeros (driven by a
+     * caller-supplied precision up to INT_MAX) can overflow the sum */
+    int fixed = (sign ? 1 : 0) + plen + ndigits;
+    int body = (lead_zeros > INT_MAX - fixed) ? INT_MAX : fixed + lead_zeros;
     int pad = (width > body) ? (width - body) : 0;
 
     if (flags & FLAG_LEFT) {                 /* left-justify: pad spaces after */
@@ -168,10 +183,18 @@ int k_vprintf_cb(k_putc_fn putc, void *userdata, const char *fmt, va_list ap) {
         int width = 0;
         if (*fmt == '*') {
             int w = va_arg(ap, int);
-            if (w < 0) { flags |= FLAG_LEFT; width = -w; } else width = w;
+            /* negative '*' width = '-' flag + positive width; negate without
+             * signed-overflow UB on INT_MIN (saturate to INT_MAX) */
+            if (w < 0) { flags |= FLAG_LEFT; width = (w == INT_MIN) ? INT_MAX : -w; }
+            else       { width = w; }
             fmt++;
         } else {
-            while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
+            /* saturating accumulate: a silly-large literal width must not
+             * overflow int (16-bit on MSP430: "%32768d" would already UB) */
+            while (*fmt >= '0' && *fmt <= '9') {
+                int d = *fmt++ - '0';
+                width = (width > (INT_MAX - d) / 10) ? INT_MAX : width * 10 + d;
+            }
         }
 
         /* ---- precision (.decimal or .*) ---- */
@@ -184,17 +207,23 @@ int k_vprintf_cb(k_putc_fn putc, void *userdata, const char *fmt, va_list ap) {
                 precision = (p < 0) ? -1 : p;
                 fmt++;
             } else {
-                while (*fmt >= '0' && *fmt <= '9') precision = precision * 10 + (*fmt++ - '0');
+                while (*fmt >= '0' && *fmt <= '9') {
+                    int d = *fmt++ - '0';
+                    precision = (precision > (INT_MAX - d) / 10) ? INT_MAX
+                                                                 : precision * 10 + d;
+                }
             }
         }
 
-        /* ---- length modifier (l/ll accepted; h/hh parsed and ignored) ---- */
+        /* ---- length modifier (l/ll accepted; h/hh parsed and ignored) ----
+         * With LONG disabled the 'l' is NOT consumed, so "%ld" falls into the
+         * unknown-specifier path: echoed literally, no vararg read - keeping
+         * the documented disabled-specifier contract (no stream desync). */
         int is_long = 0;
+#if K_PRINTF_ENABLE_LONG
         while (*fmt == 'l') { is_long = 1; fmt++; }
-        while (*fmt == 'h') { fmt++; }
-#if !K_PRINTF_ENABLE_LONG
-        is_long = 0;
 #endif
+        while (*fmt == 'h') { fmt++; }
 
         char spec = *fmt;
         if (spec == '\0') break;     /* malformed: '%' + modifiers + end */
@@ -270,6 +299,17 @@ int k_vprintf_cb(k_putc_fn putc, void *userdata, const char *fmt, va_list ap) {
 static k_putc_fn g_putc = 0;
 static void     *g_userdata = 0;
 
+/* Critical-section hooks around the global-sink path. The defaults are no-ops
+ * with weak linkage: override them (no header change needed) to serialize
+ * whole messages, e.g. against an ISR that also logs. See examples/. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) void k_printf_lock(void)   {}
+__attribute__((weak)) void k_printf_unlock(void) {}
+#else
+void k_printf_lock(void)   {}
+void k_printf_unlock(void) {}
+#endif
+
 void k_printf_init(k_putc_fn putc, void *userdata) {
     if (!putc) return;            /* reject NULL: keep the previous sink */
     g_putc = putc;
@@ -278,7 +318,10 @@ void k_printf_init(k_putc_fn putc, void *userdata) {
 
 int k_vprintf(const char *fmt, va_list ap) {
     if (!g_putc) return K_PRINTF_ERR;
-    return k_vprintf_cb(g_putc, g_userdata, fmt, ap);
+    k_printf_lock();
+    int r = k_vprintf_cb(g_putc, g_userdata, fmt, ap);
+    k_printf_unlock();
+    return r;
 }
 
 int k_printf(const char *fmt, ...) {

@@ -26,12 +26,16 @@ if(K_PRINTF_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME k_printf_test COMMAND k_printf_test)
 endif()
 
-# MSP430 example (only when cross-compiling for it)
-option(K_PRINTF_BUILD_EXAMPLES "Build the MSP430 example" OFF)
+# MSP430 examples (only when cross-compiling for it)
+option(K_PRINTF_BUILD_EXAMPLES "Build the MSP430 examples" OFF)
 if(K_PRINTF_BUILD_EXAMPLES AND CMAKE_CROSSCOMPILING)
     add_executable(example examples/main.c)
     target_link_libraries(example PRIVATE k_printf)
     set_target_properties(example PROPERTIES OUTPUT_NAME example.elf)
+
+    add_executable(example_ringbuf examples/uart_ringbuf.c)
+    target_link_libraries(example_ringbuf PRIVATE k_printf)
+    set_target_properties(example_ringbuf PROPERTIES OUTPUT_NAME example_ringbuf.elf)
 endif()
 
 # Install rules

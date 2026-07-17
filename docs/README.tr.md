@@ -9,7 +9,7 @@ gerektirmez — çıktı, verdiğiniz bir callback üzerinden bayt bayt gider.
 
 ## ✨ Özellikler
 
-- Belirteçler: `d i u x X o b c s p %` ve `%%`
+- Belirteçler: `d i u x X o b B c s p %` ve `%%`
 - **`long` desteği** (`%ld %lu %lx …`) — MSP430'da `int` yalnızca 16-bit olduğu
   için 32-bit değerler için şart
 - Alan **genişliği**, **hassasiyet** ve bayraklar (`-` `+` boşluk `0` `#`), `*`
@@ -17,7 +17,11 @@ gerektirmez — çıktı, verdiğiniz bir callback üzerinden bayt bayt gider.
 - `k_snprintf` / `k_vsnprintf` ile tampona yazma
 - Çoklu çıktı hedefi (sink + `userdata`)
 - Global durumsuz, yeniden-girilebilir çekirdek (`k_vprintf_cb`)
+- Mesaj bütünlüğü için geçersiz kılınabilir `k_printf_lock()/unlock()`
+  kancaları (varsayılan: no-op)
 - Kod boyutunu kısmak için belirteç bazında derleme anahtarları
+- `snprintf`'e karşı diferansiyel test + fuzz (ASan/UBSan); msp430-gcc ile
+  çapraz derleme
 
 ## 🚀 Hızlı başlangıç
 
@@ -51,8 +55,9 @@ int main(void) {
 
 ```bash
 make lib        # libk_printf.a (msp430-gcc)
-make example    # example.elf
+make example    # example.elf + example_ringbuf.elf
 make test       # host testleri (ASan/UBSan)
+make fuzz       # snprintf'e karşı diferansiyel fuzz (clang libFuzzer)
 ```
 
 ## 🧪 Sınırlamalar
@@ -60,8 +65,10 @@ make test       # host testleri (ASan/UBSan)
 - `l` olmadan 16-bit aralık: `%d` ±32767, `%u` 0–65535, `%x` en çok 4 hane.
 - Kayan nokta (`%f` vb.) ve `%n` yok.
 - Bilinmeyen belirteç harfi harfine yankılanır ve argüman tüketmez.
-- Çekirdek yeniden-girilebilir; ancak paylaşılan aygıta bayt-bayt çıktı **atomik
-  değildir** (ISR + main aynı anda yazarsa baytlar iç içe geçebilir).
+- Çekirdek yeniden-girilebilir; ancak paylaşılan aygıta bayt-bayt çıktı
+  varsayılan olarak **atomik değildir** (ISR + main aynı anda yazarsa baytlar
+  iç içe geçebilir). Çözüm: kesme güdümlü TX halka tamponu + lock kancaları —
+  bkz. [examples/uart_ringbuf.c](../examples/uart_ringbuf.c).
 
 Ayrıntılar ve tam belirteç tablosu için ana [README](../README.md)'ye bakın.
 

@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-07-15
+## [2.0.0] - 2026-07-17
 
 A correctness- and feature-focused rewrite. This release is **breaking**: the
 `putc` callback signature and two output behaviours changed. See "Migrating from
@@ -21,7 +21,12 @@ A correctness- and feature-focused rewrite. This release is **breaking**: the
 - Calling `k_printf` before init (NULL sink) now returns `K_PRINTF_ERR` instead
   of calling through a NULL function pointer.
 - Unknown specifiers no longer risk desyncing the vararg stream — they are echoed
-  literally and consume no argument.
+  literally and consume no argument. The same contract now genuinely holds for
+  a disabled `K_PRINTF_ENABLE_LONG`: `%ld` is echoed, not silently read as `int`.
+- `%#.0o` with the value 0 prints `0` as C11 requires (was empty).
+- Width/precision parsing, `%*d` with an `INT_MIN` width argument, and the
+  padding arithmetic no longer overflow `int` (saturating; matters doubly on
+  16-bit-`int` MSP430, where `%32768d` already overflowed).
 
 ### Added
 - **`long` support**: `%ld %lu %lx %lX %lo %lb` (essential on 16-bit-`int` MSP430).
@@ -35,9 +40,17 @@ A correctness- and feature-focused rewrite. This release is **breaking**: the
 - **Explicit sinks**: `k_printf_sink_t`, `k_fprintf`, `k_vfprintf`, and a
   reentrant core `k_vprintf_cb`, plus `k_vprintf`.
 - `userdata` pointer threaded through the `putc` callback.
+- Overridable `k_printf_lock()`/`k_printf_unlock()` critical-section hooks
+  (weak no-ops by default) around the global-sink path.
+- Interrupt-driven TX ring buffer example (`examples/uart_ringbuf.c`):
+  non-blocking output, no ISR/main byte interleaving.
 - Per-specifier compile switches: `K_PRINTF_ENABLE_LONG/_HEX/_OCTAL/_BIN/_PTR`.
 - `extern "C"` guard and `K_PRINTF_VERSION*` macros in the header.
-- Host test suite (`tests/`), CMake build + MSP430 toolchain file.
+- Host test suite (`tests/`) incl. 16-bit boundary vectors, CMake build +
+  MSP430 toolchain file.
+- Differential fuzzer vs the host `snprintf` (`tests/fuzz_k_printf.c`,
+  libFuzzer + deterministic standalone mode).
+- Doxygen config (`docs/Doxyfile`) and Doxygen-style API comments.
 
 ### Changed
 - **Breaking:** `putc` callback is now `void f(char c, void *userdata)` and
@@ -45,6 +58,9 @@ A correctness- and feature-focused rewrite. This release is **breaking**: the
 - **Breaking:** plain `%x`/`%X` no longer print a `0x`/`0X` prefix — use `%#x`.
 - Project layout flattened (removed the nested duplicate `k_printf/` directory);
   single `LICENSE` (full MIT text), single canonical README.
+- Digit conversion uses one division per digit (remainder derived from the
+  quotient) — one software-divide call instead of two on MSP430 — and the digit
+  buffer is sized from the type instead of a hard-coded constant.
 
 ## [1.0.0]
 

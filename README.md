@@ -25,8 +25,12 @@ at a time through a callback you supply.
 - `k_snprintf` / `k_vsnprintf` for formatting into a buffer
 - Multiple output sinks via an explicit sink handle + `userdata`
 - Reentrant core (`k_vprintf_cb`) with no global state
+- Overridable `k_printf_lock()`/`k_printf_unlock()` hooks (weak no-ops by
+  default) to make whole messages atomic on the global-sink path
 - Per-specifier compile switches to trim code size
 - No dynamic memory; C11; `extern "C"` for C++
+- Tested against the host `snprintf` (unit suite + differential fuzzer) under
+  ASan/UBSan; builds for MSP430 with `msp430-gcc`
 
 ---
 
@@ -91,11 +95,17 @@ run-time value: `%*d`, `%-*.*d`.
 - An **unknown specifier is echoed literally** (e.g. `%q` → `%q`) and does **not**
   consume an argument.
 - A lone trailing `%` at the end of the format string is dropped.
-- The `putc` callback must block until the byte is accepted.
+- The `h`/`hh` length modifiers are parsed but ignored (on MSP430 `int` *is*
+  16-bit, so they change nothing there; on 32-bit hosts pass values in range).
+- `%p` prints `0` for a NULL pointer (and `0x…` otherwise).
+- The `putc` callback must not return before the byte is accepted (block, or
+  enqueue into a TX ring buffer).
 - The core is reentrant, but character-by-character output to a shared device is
-  **not atomic**: calling `k_printf` from both an ISR and the main context can
-  interleave bytes. Serialize access yourself (e.g. an interrupt-driven TX ring
-  buffer) if you need that.
+  **not atomic** by default: calling `k_printf` from both an ISR and the main
+  context can interleave bytes. Use an interrupt-driven TX ring buffer plus the
+  `k_printf_lock()`/`k_printf_unlock()` overrides — see
+  [examples/uart_ringbuf.c](examples/uart_ringbuf.c) — or serialize access
+  yourself.
 
 ---
 
@@ -103,9 +113,12 @@ run-time value: `%*d`, `%-*.*d`.
 
 ```bash
 make lib                       # -> libk_printf.a (MSP430, msp430-gcc)
-make example                   # -> example.elf
+make example                   # -> example.elf + example_ringbuf.elf
 make MCU=msp430fr5969 lib      # different device
-make test                      # host build + run the test suite
+make CROSS=msp430-elf- lib     # TI's toolchain naming (msp430-elf-gcc)
+make test                      # host build + run the test suite (ASan/UBSan)
+make fuzz FUZZ_TIME=60         # differential fuzz vs snprintf (clang libFuzzer)
+make fuzz-standalone           # same fuzzer, deterministic, any compiler
 make install PREFIX=/usr/local # install lib + header
 ```
 
@@ -155,7 +168,17 @@ int log_printf(const char *fmt, ...) {
     va_end(ap);
     return r;
 }
+
+/* Make whole k_printf() messages atomic: override the weak no-op hooks.
+ * They wrap the global-sink path only (not k_fprintf/k_snprintf). */
+void k_printf_lock(void)   { /* e.g. save interrupt state + disable */ }
+void k_printf_unlock(void) { /* restore */ }
 ```
+
+For non-blocking output that also stops ISR/main byte interleaving, see the
+interrupt-driven TX ring buffer example:
+[examples/uart_ringbuf.c](examples/uart_ringbuf.c) (`make example` builds it as
+`example_ringbuf.elf`).
 
 ---
 
@@ -180,13 +203,24 @@ Everything else (`%d %u %c %s`, plain literals) is source-compatible.
 `make test` builds a host harness ([tests/test_k_printf.c](tests/test_k_printf.c))
 that formats each case with both `k_printf` and the platform `snprintf` and
 asserts equality, under `-fsanitize=address,undefined`. It covers every v1 bug
-(INT_MIN, trailing `%`, `%%`, NULL `%s`, unknown specifier) plus the new
-width/precision/flag/long paths.
+(INT_MIN, trailing `%`, `%%`, NULL `%s`, unknown specifier), the new
+width/precision/flag/long paths, the lock hooks, and a set of 16-bit boundary
+vectors (`INT16_MIN`, `UINT16_MAX`, …).
+
+`make fuzz` runs a **differential fuzzer**
+([tests/fuzz_k_printf.c](tests/fuzz_k_printf.c)) that decodes fuzz input into
+defined-behaviour format strings and compares `k_snprintf` byte-for-byte
+against the host `snprintf` (libFuzzer + ASan/UBSan). `make fuzz-standalone`
+drives the same target deterministically with any compiler.
 
 > **16 vs 32-bit caveat:** the host `int` is 32-bit, so the harness exercises the
-> INT_MIN negation path with the *host* `INT_MIN`, not MSP430's −32768. Validate
+> INT_MIN negation path with the *host* `INT_MIN`, not MSP430's −32768; the
+> 16-bit vectors pin the expected output but not the 16-bit arithmetic. Validate
 > true 16-bit behaviour on an MSP430 simulator (mspdebug `simu` / QEMU) capturing
 > UART bytes.
+
+API reference docs can be generated with Doxygen: `cd docs && doxygen Doxyfile`
+(output in `docs/doxygen/html/`).
 
 ---
 
