@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### HDL
+- New `hdl/` hardware `printf` core (`k_printf_hdl`): a synthesizable, vendor-neutral
+  SystemVerilog + VHDL-2008 implementation that reuses the C formatting rules to emit a
+  formatted ASCII byte stream over a `valid`/`ready` handshake. Not a translation — a
+  separate core driven from a micro-op ROM compiled by `tools/k_fmtgen.py`, with **this
+  C library as its golden model**.
+- Phase-1 reference slice: specifiers `%d %i %u %x %X %o %b %B %p %c %s %%`, flags
+  `- 0 # + space`, field width, and `l`; decimal via serial double-dabble (no divider).
+- Local verification (`make -C hdl test`, no CI): 165 differential vectors, SV (Icarus,
+  randomized back-pressure) and VHDL (GHDL) each byte-for-byte equal to the C golden;
+  triple-diff C = SV = VHDL.
+- Frozen micro-op ISA (`docs/hdl/fmt_isa.md`) and the plan
+  (`k_printf_hdl_gelistirme_notu.md`, repo root).
+
 ## [2.0.0] - 2026-07-17
 
 A correctness- and feature-focused rewrite. This release is **breaking**: the

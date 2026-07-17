@@ -224,6 +224,27 @@ API reference docs can be generated with Doxygen: `cd docs && doxygen Doxyfile`
 
 ---
 
+## 🔩 Hardware (HDL) core
+
+A synthesizable hardware equivalent lives in [hdl/](hdl/): a vendor-neutral
+SystemVerilog + VHDL-2008 core (`k_printf_hdl`) that reuses these same formatting
+rules to emit a formatted ASCII byte stream over a `valid`/`ready` handshake (e.g. to a
+UART TX) — for CPU-less FPGA designs. It is **not** a translation of the C code: formats
+are compiled to a micro-op ROM by [tools/k_fmtgen.py](tools/k_fmtgen.py), and **this C
+library is its golden model** — both HDL cores are checked byte-for-byte against
+`k_snprintf` (oracle chain `snprintf → k_printf → k_printf_hdl`).
+
+```bash
+make -C hdl test     # k_fmtgen -> C golden -> SV (Icarus) + VHDL (GHDL) differential -> triple-diff
+```
+
+Current status is a working, locally-verified Phase-1 slice (specifiers
+`%d %i %u %x %X %o %b %B %p %c %s %%`, flags `- 0 # + space`, width, `l`; decimal via
+double-dabble; 165/165 differential vectors, C = SV = VHDL). See
+[hdl/README.md](hdl/README.md) and the roadmap in `k_printf_hdl_gelistirme_notu.md`.
+
+---
+
 ## 📜 License
 
 MIT © [KaanErgun](https://github.com/KaanErgun) — see [LICENSE](LICENSE).

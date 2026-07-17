@@ -14,6 +14,11 @@ build-cmake/
 # Generated docs
 docs/doxygen/
 
+# HDL generated + simulation artifacts (regenerate with `make -C hdl`)
+hdl/gen/
+e~*.lst
+work-obj*.cf
+
 # Editor / OS
 .DS_Store
 *.swp
