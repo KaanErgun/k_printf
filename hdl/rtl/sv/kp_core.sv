@@ -1,16 +1,18 @@
-// kp_core.sv - k_printf_hdl formatting core (reference slice, ISA v1).
+// kp_core.sv - k_printf_hdl formatting core (ISA v2, docs/hdl/fmt_isa.md).
 //
 // RTL image of the C library's stateless core (k_vprintf_cb): consumes micro-ops
 // from a ROM built by tools/k_fmtgen.py and emits the formatted ASCII byte stream
 // with valid/ready handshake. Golden model = the real C library (see hdl/gold).
 //
-// Feature slice: LIT, EOM, %c, %s(table-id), %d %i %u %x %X %o %b %B %p, flags
-// - 0 # + space, field width 0..63, and the l (32-bit) modifier. Decimal via
-// serial double-dabble (no divider), matching the plan. Precision / '*' deferred.
+// Features: LIT, EOM, %c, %s(table-id), %d %i %u %x %X %o %b %B %p, flags
+// - 0 # + space, field width AND .precision 0..63 (literal or '*' from an
+// argument, C semantics incl. negative '*'), the l (32-bit) modifier. Decimal
+// via serial double-dabble (no divider). ROM header (magic+version) verified at
+// run time; invalid msg_id / malformed uop -> drop + sticky err, never hangs.
 //
-// Style note: this reference keeps a small digit buffer (<=32 bytes) and emits
-// sign/prefix/pad via counters - correctness first; the plan's buffer-free area
-// optimisation is Phase-2 work. Written in a synthesizable, Icarus-friendly subset.
+// Style note: this reference assembles each field into a small buffer and
+// streams it - correctness first; the plan's buffer-free emit refactor (needed
+// before kp_core itself synthesizes practically) is the next step.
 `default_nettype none
 
 module kp_core #(
@@ -20,6 +22,7 @@ module kp_core #(
     parameter        STRTAB_FILE = "str_table.mem",
     parameter        MSTART_FILE = "msg_start.mem",
     parameter        MARITY_FILE = "msg_arity.mem",
+    parameter int    ISA_VERSION = 2,
     parameter int    N_UOPS   = 90,
     parameter int    LIT_BYTES= 149,
     parameter int    STR_BYTES= 20,
@@ -66,34 +69,42 @@ module kp_core #(
     // ---- FSM ----
     localparam [3:0]
         S_IDLE=4'd0, S_FETCH=4'd1, S_LIT=4'd2, S_NUMSET=4'd3, S_DD=4'd4,
-        S_POW2=4'd5, S_LAYOUT=4'd6, S_EMIT=4'd7, S_STRLD=4'd8, S_EOM=4'd9;
+        S_POW2=4'd5, S_LAYOUT=4'd6, S_EMIT=4'd7, S_STRLD=4'd8, S_EOM=4'd9,
+        S_RESOLVE=4'd10, S_DROP=4'd11;
+
+    // ROM word 0 must carry this header, or every message is refused (err).
+    localparam [31:0] ROM_HDR = 32'h4B50_0000 | ISA_VERSION[7:0];
     reg [3:0]  st;
     reg [15:0] pc;                 // uop index
     reg [31:0] arg_snap [0:ARGC_MAX-1];
 
-    // current uop decode
+    // current uop decode (shared field positions per docs/hdl/fmt_isa.md)
     reg [31:0] uw;
-    wire [2:0] op    = uw[31:29];
-    wire [15:0] lit_addr = uw[15:0];
-    wire [11:0] lit_len  = uw[27:16];
-    wire [1:0] base  = uw[1:0];
-    wire       upper = uw[2];
-    wire       is_sig= uw[3];
-    wire       size32= uw[4];
-    wire [4:0] flags = uw[9:5];
-    wire [5:0] width = uw[15:10];
-    wire [2:0] aslot = uw[18:16];
+    wire [2:0] op       = uw[31:29];
+    wire [1:0] base     = uw[1:0];
+    wire       upper    = uw[2];
+    wire       is_sig   = uw[3];
+    wire       size32   = uw[4];
+    wire [4:0] flags    = uw[9:5];
+    wire [5:0] width    = uw[15:10];
+    wire [2:0] aslot    = uw[18:16];
+    wire [5:0] precf    = uw[24:19];
+    wire       prec_en  = uw[25];
+    wire       w_from_a = uw[26];
+    wire       p_from_a = uw[27];
 
     // literal streaming
     reg [15:0] lit_ptr, lit_rem;
 
-    // numeric working state
+    // resolved per-conversion state (literal or '*'-sourced)
     reg [31:0] mag;                // magnitude
-    reg        neg;
     reg [1:0]  cbase;
     reg        cupper;
     reg [4:0]  cflags;
     reg [5:0]  cwidth;
+    reg        cpen;               // effective precision present
+    reg [5:0]  cprec;              // effective precision value
+    reg [2:0]  vslot;              // derived value slot (past *-args)
     reg [7:0]  dig [0:31];         // ascii digits, LSB-first
     reg [5:0]  ndig;
     reg [39:0] bcd;
@@ -103,9 +114,6 @@ module kp_core #(
 
     // emit plan
     reg [7:0]  sign_ch;            // 0 = none
-    reg [1:0]  plen;
-    reg [7:0]  pfx0, pfx1;
-    reg [6:0]  pre_sp, zpad, post_sp;
     reg [1:0]  body_sel;           // 0=DIG 1=CHR 2=STR
     reg [7:0]  chr_byte;
     reg [15:0] str_addr;
@@ -119,9 +127,9 @@ module kp_core #(
                     : (up ? (8'h41 + (v - 4'd10)) : (8'h61 + (v - 4'd10)));
     endfunction
 
-    // helper: pick arg slot
-    reg [31:0] cur_arg;
-    always @(*) cur_arg = arg_snap[aslot];
+    function [5:0] sat63(input [31:0] v);
+        sat63 = (v > 32'd63) ? 6'd63 : v[5:0];
+    endfunction
 
     integer k;
     always @(posedge clk) begin
@@ -139,8 +147,12 @@ module kp_core #(
                     for (k = 0; k < ARGC_MAX; k = k+1)
                         arg_snap[k] <= args_flat[k*32 +: 32];   // atomic snapshot
                     msg_len <= 16'd0;
-                    if (msg_id >= N_MSGS) begin
-                        err <= 1'b1; st <= S_IDLE;   // drop, never hang
+                    // !== : an X/unloaded ROM must fail CLOSED (refuse), like
+                    // the VHDL twin's all-zeros fallback; yosys treats it as !=
+                    if (uop_rom[0] !== ROM_HDR) begin
+                        err <= 1'b1; st <= S_DROP;   // wrong ROM image: refuse all
+                    end else if (msg_id >= N_MSGS) begin
+                        err <= 1'b1; st <= S_DROP;   // drop, never hang
                     end else begin
                         pc <= msg_start[msg_id][15:0];
                         st <= S_FETCH;
@@ -148,13 +160,17 @@ module kp_core #(
                 end
             end
             // ------------------------------------------------------------
+            S_DROP: begin
+                // one-cycle bounce after refusing a message, so exactly one
+                // msg_ready pulse pairs with each presented message (staying
+                // in S_IDLE would re-accept every cycle and let a duplicate
+                // ready pulse swallow a later good message)
+                st <= S_IDLE;
+            end
+            // ------------------------------------------------------------
             S_FETCH: begin
                 uw <= uop_rom[pc];
                 pc <= pc + 16'd1;
-                // decode next cycle via combinational wires on uw; branch here
-                // using the freshly-latched value requires a 1-cycle settle:
-                st <= S_LAYOUT;    // provisional; corrected below by op
-                // We decode by reading uop_rom[pc] directly (same value as uw):
                 case (uop_rom[pc][31:29])
                 OP_LIT: begin
                     lit_ptr <= uop_rom[pc][15:0];
@@ -162,31 +178,51 @@ module kp_core #(
                     st <= S_LIT;
                 end
                 OP_EOM: st <= S_EOM;
-                OP_FMT: st <= S_NUMSET;
-                OP_CHR: begin
-                    chr_byte <= arg_snap[uop_rom[pc][18:16]][7:0];
-                    cflags   <= uop_rom[pc][9:5];
-                    cwidth   <= uop_rom[pc][15:10];
-                    body_sel <= 2'd1;
-                    sign_ch  <= 8'd0; plen <= 2'd0;
-                    body_len <= 7'd1;
-                    st <= S_LAYOUT;
-                end
-                OP_STR: begin
-                    cflags   <= uop_rom[pc][9:5];
-                    cwidth   <= uop_rom[pc][15:10];
-                    body_sel <= 2'd2;
-                    sign_ch  <= 8'd0; plen <= 2'd0;
-                    // str_id from arg slot, looked up next state
-                    str_addr <= {16{1'b0}};   // set in S_STRLD
-                    // stash chosen id via chr_byte reuse? use dedicated:
-                    pw_tmp   <= arg_snap[uop_rom[pc][18:16]]; // holds str id
-                    st <= S_STRLD;
-                end
+                OP_FMT, OP_CHR, OP_STR: st <= S_RESOLVE;
                 default: begin      // reserved opcode -> malformed
                     err <= 1'b1; st <= S_EOM;
                 end
                 endcase
+            end
+            // ------------------------------------------------------------
+            S_RESOLVE: begin
+                // shared for FMT/CHR/STR: resolve '*'-sourced width/precision
+                // from the leading argument slots ([w][p][value] order) and
+                // latch the effective flags/width/precision + value slot.
+                begin : rsv
+                    reg [2:0] s; reg [31:0] wa, pa; reg [4:0] f;
+                    s = aslot; f = flags;
+                    if (w_from_a) begin
+                        wa = arg_snap[s]; s = s + 3'd1;
+                        if (wa[31]) begin       /* negative '*' width = LEFT */
+                            f = f | (5'd1 << F_LEFT);
+                            cwidth <= sat63(32'd0 - wa);
+                        end else cwidth <= sat63(wa);
+                    end else cwidth <= width;
+                    if (p_from_a) begin
+                        pa = arg_snap[s]; s = s + 3'd1;
+                        cpen  <= ~pa[31];       /* negative '.*' = no precision */
+                        cprec <= pa[31] ? 6'd0 : sat63(pa);
+                    end else begin
+                        cpen <= prec_en; cprec <= precf;
+                    end
+                    cflags <= f;
+                    vslot  <= s;
+                    sign_ch <= 8'd0;
+                    case (op)
+                    OP_FMT: st <= S_NUMSET;
+                    OP_CHR: begin
+                        chr_byte <= arg_snap[s][7:0];
+                        body_sel <= 2'd1; body_len <= 8'd1;
+                        st <= S_LAYOUT;
+                    end
+                    default: begin  /* OP_STR */
+                        pw_tmp   <= arg_snap[s];   /* string-table id */
+                        body_sel <= 2'd2;
+                        st <= S_STRLD;
+                    end
+                    endcase
+                end
             end
             // ------------------------------------------------------------
             S_LIT: begin
@@ -210,7 +246,9 @@ module kp_core #(
                 // pw_tmp holds the string id; clamp to table then load {addr,len}
                 begin : strload
                     reg [31:0] te, sid;
-                    sid = pw_tmp % N_STRINGS;
+                    // id = low 16 bits mod table size (ISA rule; matches the
+                    // golden dispatch and the VHDL integer range)
+                    sid = pw_tmp[15:0] % N_STRINGS;
                     te  = str_table[sid];
                     str_addr <= te[15:0];
                     body_len <= te[23:16];   // string length
@@ -220,23 +258,26 @@ module kp_core #(
             end
             // ------------------------------------------------------------
             S_NUMSET: begin
-                cbase  <= base; cupper <= upper; cflags <= flags; cwidth <= width;
+                cbase <= base; cupper <= upper;
                 begin : numset
-                    reg [31:0] v; reg n;
-                    v = size32 ? cur_arg : {16'd0, cur_arg[15:0]};
+                    reg [31:0] a, v; reg n;
+                    a = arg_snap[vslot];
+                    v = size32 ? a : {16'd0, a[15:0]};
                     n = 1'b0;
                     if (is_sig) begin
-                        if (size32 ? cur_arg[31] : cur_arg[15]) begin
+                        if (size32 ? a[31] : a[15]) begin
                             n = 1'b1;
-                            v = size32 ? (32'd0 - cur_arg)
-                                       : {16'd0, (16'd0 - cur_arg[15:0])};
+                            v = size32 ? (32'd0 - a)
+                                       : {16'd0, (16'd0 - a[15:0])};
                         end
                     end
-                    mag <= v; neg <= n;
-                    // sign char
+                    mag <= v;
+                    // sign char (cflags resolved in S_RESOLVE). The golden C
+                    // library applies '+'/' ' to unsigned conversions too (its
+                    // documented deviation from ISO C) - mirror it exactly.
                     if (is_sig && n)                      sign_ch <= 8'h2d; // '-'
-                    else if (is_sig && flags[F_PLUS])     sign_ch <= 8'h2b; // '+'
-                    else if (is_sig && flags[F_SPACE])    sign_ch <= 8'h20; // ' '
+                    else if (cflags[F_PLUS])              sign_ch <= 8'h2b; // '+'
+                    else if (cflags[F_SPACE])             sign_ch <= 8'h20; // ' '
                     else                                  sign_ch <= 8'd0;
                     // prep converters
                     bcd <= 40'd0; ddbin <= v; ddi <= 6'd0;
@@ -295,41 +336,70 @@ module kp_core #(
             // ------------------------------------------------------------
             S_LAYOUT: begin
                 // assemble the whole field into fld[0..flen-1], matching the C
-                // fmt_int layout: [pre_sp][sign][prefix][zero_pad] body [post_sp]
+                // fmt_int layout: [pre_sp][sign][prefix][zeros] digits [post_sp]
+                // with the C precision rules (see src/k_printf.c fmt_int).
                 begin : lay
                     reg is_zero; reg [1:0] pl; reg [7:0] p0, p1;
-                    reg [7:0] blen, bl, pad; reg zero_ok, slen;
+                    reg [7:0] nde, lz, blen, bl, pad; reg zero_ok, slen;
                     reg [7:0] presp, zp, postsp;
                     integer j; reg [7:0] idx;
                     slen = (sign_ch != 0) ? 8'd1 : 8'd0;
                     is_zero = (body_sel == 2'd0) && (mag == 0);
+                    // precision 0 with value 0 => no digits at all (C rule)
+                    nde = (body_sel == 2'd0 && cpen && cprec == 0 && mag == 0)
+                          ? 8'd0 : {2'd0, ndig};
+                    // precision = minimum digit count (zero-filled)
+                    lz = (body_sel == 2'd0 && cpen && {2'd0,cprec} > nde)
+                         ? ({2'd0,cprec} - nde) : 8'd0;
+                    // alternate form: hex/bin get a prefix (nonzero only);
+                    // octal forces a leading zero unless one already leads
+                    // (C11 %#.0o-of-0 prints "0")
                     pl = 2'd0; p0 = 8'd0; p1 = 8'd0;
-                    if (body_sel == 2'd0 && cflags[F_HASH] && !is_zero) begin
-                        if (cbase == B_HEX) begin pl=2'd2; p0=8'h30; p1=(cupper?8'h58:8'h78); end
-                        else if (cbase == B_BIN) begin pl=2'd2; p0=8'h30; p1=(cupper?8'h42:8'h62); end
-                        else if (cbase == B_OCT) begin pl=2'd1; p0=8'h30; end
+                    if (body_sel == 2'd0 && cflags[F_HASH]) begin
+                        if (cbase == B_HEX && !is_zero) begin
+                            pl=2'd2; p0=8'h30; p1=(cupper?8'h58:8'h78);
+                        end else if (cbase == B_BIN && !is_zero) begin
+                            pl=2'd2; p0=8'h30; p1=(cupper?8'h42:8'h62);
+                        end else if (cbase == B_OCT) begin
+                            if (lz == 0 && !(nde > 0 && mag == 0)) lz = 8'd1;
+                        end
                     end
-                    blen = (body_sel==2'd0) ? {2'd0,ndig} : ((body_sel==2'd1) ? 8'd1 : body_len);
+                    // body length per kind; %s truncated by precision
+                    if (body_sel == 2'd0)      blen = lz + nde;
+                    else if (body_sel == 2'd1) blen = 8'd1;
+                    else begin
+                        blen = body_len;
+                        if (cpen && {2'd0,cprec} < blen) blen = {2'd0,cprec};
+                    end
                     bl  = slen + {6'd0,pl} + blen;
                     pad = (cwidth > bl) ? (cwidth - bl) : 8'd0;
-                    zero_ok = (body_sel==2'd0) && cflags[F_ZERO] && !cflags[F_LEFT];
+                    // '0' flag: numeric only, not with '-', ignored with precision
+                    zero_ok = (body_sel==2'd0) && cflags[F_ZERO] && !cflags[F_LEFT] && !cpen;
                     presp = 8'd0; zp = 8'd0; postsp = 8'd0;
                     if (cflags[F_LEFT])   postsp = pad;
                     else if (zero_ok)     zp     = pad;
                     else                  presp  = pad;
-                    // fill buffer
+                    // fill buffer (constant-bound loops with guards: yosys needs
+                    // static trip counts; mirrors the VHDL twin exactly)
                     idx = 0;
-                    for (j = 0; j < presp; j = j+1) begin fld[idx] = 8'h20; idx = idx+1; end
-                    if (slen)                     begin fld[idx] = sign_ch; idx = idx+1; end
-                    if (pl >= 1)                  begin fld[idx] = p0; idx = idx+1; end
-                    if (pl == 2)                  begin fld[idx] = p1; idx = idx+1; end
-                    for (j = 0; j < zp; j = j+1)   begin fld[idx] = 8'h30; idx = idx+1; end
-                    if (body_sel == 2'd0)
-                        for (j = 0; j < blen; j = j+1) begin fld[idx] = dig[ndig-1-j[5:0]]; idx = idx+1; end
-                    else if (body_sel == 2'd1)    begin fld[idx] = chr_byte; idx = idx+1; end
-                    else
-                        for (j = 0; j < blen; j = j+1) begin fld[idx] = str_pool[str_addr + j[15:0]]; idx = idx+1; end
-                    for (j = 0; j < postsp; j = j+1) begin fld[idx] = 8'h20; idx = idx+1; end
+                    for (j = 0; j < 64; j = j+1)
+                        if (j < presp) begin fld[idx] = 8'h20; idx = idx+1; end
+                    if (slen != 0) begin fld[idx] = sign_ch; idx = idx+1; end
+                    if (pl >= 1)   begin fld[idx] = p0; idx = idx+1; end
+                    if (pl == 2)   begin fld[idx] = p1; idx = idx+1; end
+                    for (j = 0; j < 128; j = j+1)
+                        if (j < zp + lz) begin fld[idx] = 8'h30; idx = idx+1; end
+                    if (body_sel == 2'd0) begin
+                        for (j = 0; j < 32; j = j+1)
+                            if (j < nde) begin fld[idx] = dig[nde-1-j[5:0]]; idx = idx+1; end
+                    end else if (body_sel == 2'd1) begin
+                        fld[idx] = chr_byte; idx = idx+1;
+                    end else begin
+                        for (j = 0; j < 64; j = j+1)
+                            if (j < blen) begin fld[idx] = str_pool[str_addr + j[15:0]]; idx = idx+1; end
+                    end
+                    for (j = 0; j < 64; j = j+1)
+                        if (j < postsp) begin fld[idx] = 8'h20; idx = idx+1; end
                     flen = idx;
                 end
                 fidx <= 8'd0; out_valid <= 1'b0;

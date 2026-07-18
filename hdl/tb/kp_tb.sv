@@ -156,6 +156,87 @@ module kp_tb;
             end
         end
 
+        // ---- directed negative tests (error paths; excluded from the dumps) ----
+        // (A) invalid msg_id: dropped silently, err set, no bytes, no out_last
+        begin : neg_badmsg
+            integer i2; reg saw;
+            collecting = 0; bp_pattern = 0;
+            @(posedge clk);
+            msg_id    <= KP_N_MSGS[15:0];      // out of range
+            msg_valid <= 1'b1;
+            @(posedge clk);
+            while (!msg_ready) @(posedge clk);
+            msg_valid <= 1'b0;
+            saw = 0;
+            for (i2 = 0; i2 < 200; i2 = i2 + 1) begin
+                @(posedge clk);
+                if (out_valid) saw = 1;
+            end
+            checks = checks + 1;
+            if (saw || !err) begin
+                fails = fails + 1;
+                $display("FAIL BAD_MSG: saw_byte=%0d err=%0d", saw, err);
+            end
+        end
+        // (A2) hold a bad msg_valid high: msg_ready must never pulse in two
+        // consecutive cycles (the S_DROP bounce), or a streaming producer's
+        // next good message could be swallowed by a duplicate ready pulse
+        begin : neg_pulsetrain
+            integer i2; reg prev; reg twice;
+            @(posedge clk);
+            msg_id    <= KP_N_MSGS[15:0];
+            msg_valid <= 1'b1;
+            prev = 0; twice = 0;
+            for (i2 = 0; i2 < 8; i2 = i2 + 1) begin
+                @(posedge clk);
+                if (msg_ready && prev) twice = 1;
+                prev = msg_ready;
+            end
+            msg_valid <= 1'b0;
+            repeat (4) @(posedge clk);
+            checks = checks + 1;
+            if (twice) begin
+                fails = fails + 1;
+                $display("FAIL READY_TRAIN: consecutive msg_ready pulses on drop path");
+            end
+        end
+        // (B) malformed uop: err set, out_last marker, zero data bytes
+        begin : neg_baduop
+            ngot = 0; collecting = 1;
+            drive_message(KP_BAD_UOP_MSG_ID, 0);
+            begin : wd2
+                integer guard;
+                guard = 0;
+                while (collecting && guard < 200000) begin
+                    @(posedge clk); guard = guard + 1;
+                end
+            end
+            @(posedge clk);
+            checks = checks + 1;
+            if (ngot != 0 || !err) begin
+                fails = fails + 1;
+                $display("FAIL BAD_UOP: ngot=%0d err=%0d", ngot, err);
+            end
+        end
+        // (C) recovery: a normal message still prints after both error paths
+        begin : neg_recover
+            ngot = 0; collecting = 1;
+            drive_message(1, 0);               // MSG_HELLO, arity 0
+            begin : wd3
+                integer guard;
+                guard = 0;
+                while (collecting && guard < 200000) begin
+                    @(posedge clk); guard = guard + 1;
+                end
+            end
+            @(posedge clk);
+            checks = checks + 1;
+            if (ngot == 0) begin
+                fails = fails + 1;
+                $display("FAIL RECOVERY: no bytes after error paths");
+            end
+        end
+
         $fclose(vf); $fclose(ef); $fclose(of);
         $display("RESULT: %0d checks, %0d failures", checks, fails);
         if (fails != 0) $display("SV-DIFF: FAIL");

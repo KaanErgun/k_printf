@@ -467,20 +467,42 @@ K_MSG(MSG_PORT,     "Port: %08b\r\n",                 1)
 
 ---
 
-## 8b. Uygulama durumu (2026-07-18)
+## 8b. Uygulama durumu (2026-07-18, ikinci tur — v2.1.0)
 
-Plan hayata geçirilmeye başlandı; **Faz 0 + Faz 1'in dikey diliminin çalışan, yerel olarak
-doğrulanmış bir gerçeklemesi** repoda (`hdl/`, `tools/k_fmtgen.py`, `docs/hdl/`). Özet:
+**Faz 0 + Faz 1 + Faz 2'nin çekirdek maddeleri çalışır ve yerel olarak doğrulanmış durumda**
+(`hdl/`, `tools/k_fmtgen.py`, `docs/hdl/`). Özet:
 
-- **µop ISA v1 donduruldu** — `docs/hdl/fmt_isa.md`; her iki RTL ve codegen birebir bu alanları uygular.
-- **`k_fmtgen.py`** — `hdl/fmt/messages.h` → µop ROM + literal/string havuzları + string tablo + ID/boyut header'ları (SV `.svh` + VHDL paketi) + **C altın dispatch'i** + yönlendirilmiş/rastgele test vektörleri; desteklenmeyen format = üretim hatası (gramer otoritesi C'de).
-- **Altın model** — `hdl/gold/kp_gold.c` gerçek `k_snprintf`'i linkler; oracle zinciri `snprintf → C k_printf → k_printf_hdl`.
-- **İki RTL çekirdek** — `hdl/rtl/sv/kp_core.sv` (SystemVerilog) ve `hdl/rtl/vhdl/kp_core.vhd` (VHDL-2008 yapısal ayna). Belirteçler `%d %i %u %x %X %o %b %B %p %c %s %%` + literal; bayraklar `- 0 # + boşluk`; genişlik 0..63; `l` (32-bit). Ondalık **seri double-dabble** (bölücü yok). INT_MIN-güvenli büyüklük, C'nin üç-dallı yerleşimi, `0`+precision ve `%#o` kuralları birebir. Kayıtlı valid/ready + geri-basınç.
-- **Doğrulama (yerel, CI yok):** `make -C hdl test` → **165/165** diferansiyel vektör SV (Icarus, rastgele geri-basınçlı) ve VHDL (GHDL) için C altın modeline bayt-bayt eşit; **üçlü diff C = SV = VHDL** geçiyor (bayt akışı `ready` zamanlamasından bağımsız kanıtlandı).
-- **Henüz yok (dürüst):** `.precision`, `*`, runtime parser, tetik/arbiter, capture/register-map/AXI ön yüzleri, sentez/alan/fmax sayıları. Hata yolları (geçersiz `msg_id`/bozuk µop) çekirdeklerde var ama TB'de yönlendirilmiş negatif testle sürülmedi (Faz 2). `hdl/README.md`'de "Verification status" bölümünde tekrar edildi.
+- **µop ISA v2 donduruldu** — `docs/hdl/fmt_isa.md`: rezerv bitlerde `.precision`/`*`
+  alanları + **ROM başlık sözcüğü** (magic `"KP"` + sürüm; RTL çalışma anında doğrular,
+  uyuşmayan ROM `err` ile reddedilir — "eski ROM + yeni RTL" sınıfı sessiz çalışamaz).
+- **`k_fmtgen.py`** — format → µop ROM + havuzlar + C altın dispatch + vektörler;
+  `--seed/--nrandom` ile tekrarlanabilir rastgele setler; desteklenmeyen format üretim
+  hatası; son mesaj id'si kasıtlı bozuk-µop test mesajı (`KP_BAD_UOP_MSG_ID`).
+- **İki RTL çekirdek** (SV + VHDL-2008 yapısal ayna): belirteçler
+  `%d %i %u %x %X %o %b %B %p %c %s %%` + literal; bayraklar `- 0 # + boşluk`;
+  **genişlik ve `.precision` 0..63 (literal veya `*`, negatif `*` dahil C semantiği)**;
+  `l` (32-bit); `h/hh` yok sayılır. C kuralları birebir: `0`+precision, `%.0d`-of-0,
+  `%#o` ve C11 `%#.0o`-of-0, INT_MIN-güvenli büyüklük. Tanımlı hata davranışı:
+  geçersiz `msg_id`/bozuk µop → mesaj düşer, yapışkan `err`, asla kilitlenmez.
+- **`kp_uart_tx` (SV+VHDL):** 8N1, kesirli (N.F) baud akümülatörü (türetilmiş saat yok
+  — `UCBRS` modülasyonunun RTL ucu). Sistem zinciri core→UART, seri hat **gerçek bit
+  zamanlarında** bağımsız alıcı modeliyle örneklenerek altına karşı doğrulandı.
+- **Doğrulama (yerel, CI yok):** `make -C hdl test` → **300 diferansiyel vektör +
+  4 yönlendirilmiş negatif test**, SV (Icarus) ve VHDL (GHDL) C altınına bayt-bayt
+  eşit, **iki TB'de de rastgele geri-basınç**; üçlü diff C = SV = VHDL; UART zinciri
+  12/12; `make -C hdl fuzz` taze tohumla 672 vektör — hepsi yeşil.
+- **Sentez kalibrasyonu (ilk):** `kp_uart_tx` = 85 SB_LUT4 (iCE40, yosys 0.67).
+  **`kp_core` henüz pratik sentezlenemiyor:** referans gerçeklemenin 96-baytlık alan
+  tamponu (korumalı yazma döngüleri) yosys'te >10 dk süren bir mux ağına açılıyor —
+  planın Faz-2 "tampon-suz emit" refaktörünün gerekliliğinin birebir doğrulaması.
+  Simülasyon semantiği etkilenmez; alan bütçesi o refaktöre kadar hipotez kalır.
+- **Henüz yok (dürüst):** runtime ASCII parser, çok-kaynaklı tetik/arbiter,
+  capture/register-map/AXI ön yüzleri, opt-in `G_EN_*` generic matrisi, formal (sby),
+  nextpnr fmax. Faz 3 sırası bunlarla devam eder.
 
-Sonraki adımlar Faz 2 sırasını izler: `.prec`/`*`, negatif testler, opt-in generic'ler, ardından
-tetik/arbiter ve sistem ön yüzleri. Her adım `make -C hdl test`'i yeşil tutmalıdır.
+Sonraki adımlar: tampon-suz emit refaktörü (sentez kilidini açar), opt-in generic'ler +
+konfig matrisi, ardından Faz 3 sistem özellikleri. Her adım `make -C hdl test`'i yeşil
+tutmalıdır.
 
 ---
 

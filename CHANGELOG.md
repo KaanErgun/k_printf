@@ -4,21 +4,36 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] - 2026-07-18
+
+No C library behaviour changes in this release — the version bump covers the new
+hardware (HDL) core in the same repo (shared SemVer per the HDL plan).
 
 ### HDL
-- New `hdl/` hardware `printf` core (`k_printf_hdl`): a synthesizable, vendor-neutral
-  SystemVerilog + VHDL-2008 implementation that reuses the C formatting rules to emit a
-  formatted ASCII byte stream over a `valid`/`ready` handshake. Not a translation — a
-  separate core driven from a micro-op ROM compiled by `tools/k_fmtgen.py`, with **this
-  C library as its golden model**.
-- Phase-1 reference slice: specifiers `%d %i %u %x %X %o %b %B %p %c %s %%`, flags
-  `- 0 # + space`, field width, and `l`; decimal via serial double-dabble (no divider).
-- Local verification (`make -C hdl test`, no CI): 165 differential vectors, SV (Icarus,
-  randomized back-pressure) and VHDL (GHDL) each byte-for-byte equal to the C golden;
-  triple-diff C = SV = VHDL.
-- Frozen micro-op ISA (`docs/hdl/fmt_isa.md`) and the plan
-  (`k_printf_hdl_gelistirme_notu.md`, repo root).
+- New `hdl/` hardware `printf` core (`k_printf_hdl`): a synthesizable-RTL,
+  vendor-neutral SystemVerilog + VHDL-2008 implementation that reuses the C formatting
+  rules to emit a formatted ASCII byte stream over a `valid`/`ready` handshake. Not a
+  translation — a separate core driven from a micro-op ROM compiled by
+  `tools/k_fmtgen.py`, with **this C library as its golden model** (oracle chain
+  `snprintf → k_printf → k_printf_hdl`).
+- Feature set (µop ISA v2, `docs/hdl/fmt_isa.md`): specifiers
+  `%d %i %u %x %X %o %b %B %p %c %s %%` + literals, flags `- 0 # + space`, field
+  width and `.precision` 0..63 (literal or `*` from an argument, C semantics incl.
+  negative `*`), `l` (32-bit), `h/hh` ignored; decimal via serial double-dabble
+  (no divider); C's exact layout rules (`0`+precision, `%.0d`-of-0, `%#o`,
+  C11 `%#.0o`-of-0, INT_MIN-safe magnitude).
+- Defined error behaviour: invalid `msg_id` / malformed µop → drop + sticky `err`,
+  never hangs; µop ROM carries a magic+version header the cores verify at run time.
+- `kp_uart_tx` (both languages): 8N1 UART sink with a fractional (N.F) baud
+  accumulator; system chain core→UART verified against the golden at real bit times.
+  First synthesis calibration: 85 SB_LUT4 on iCE40 (yosys).
+- Local verification (`make -C hdl test`, no CI): 300 differential vectors + directed
+  negative tests, SV (Icarus) and VHDL (GHDL) each byte-for-byte equal to the C
+  golden under randomized back-pressure; triple-diff C = SV = VHDL; fresh-seed
+  `make -C hdl fuzz` re-runs (700+ vectors).
+- Known limitation (honest): the reference core's field buffer makes `kp_core` itself
+  impractical to synthesize until the planned buffer-free emit refactor; the UART and
+  all simulation semantics are unaffected. Roadmap: `k_printf_hdl_gelistirme_notu.md`.
 
 ## [2.0.0] - 2026-07-17
 

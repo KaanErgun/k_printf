@@ -7,7 +7,7 @@ at a time through a callback you supply.
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-MSP430-blue)
 ![Language](https://img.shields.io/badge/language-C-lightgrey)
-![Version](https://img.shields.io/badge/version-2.0.0-orange)
+![Version](https://img.shields.io/badge/version-2.1.0-orange)
 
 > This is the canonical README. A Turkish summary lives in
 > [docs/README.tr.md](docs/README.tr.md) (may lag behind this file).
@@ -235,12 +235,14 @@ library is its golden model** — both HDL cores are checked byte-for-byte again
 `k_snprintf` (oracle chain `snprintf → k_printf → k_printf_hdl`).
 
 ```bash
-make -C hdl test     # k_fmtgen -> C golden -> SV (Icarus) + VHDL (GHDL) differential -> triple-diff
+make -C hdl test     # k_fmtgen -> C golden -> SV + VHDL differential -> triple-diff -> UART chain
 ```
 
-Current status is a working, locally-verified Phase-1 slice (specifiers
-`%d %i %u %x %X %o %b %B %p %c %s %%`, flags `- 0 # + space`, width, `l`; decimal via
-double-dabble; 165/165 differential vectors, C = SV = VHDL). See
+Current status (Phase 2): specifiers `%d %i %u %x %X %o %b %B %p %c %s %%`, flags
+`- 0 # + space`, width and `.precision` incl. `*`, `l`; decimal via double-dabble;
+defined error paths + ROM version header; an 8N1 UART sink (`kp_uart_tx`, fractional
+baud) with the full chain verified at real bit times. 300 differential vectors +
+negative tests + fresh-seed fuzz, C = SV = VHDL under randomized back-pressure. See
 [hdl/README.md](hdl/README.md) and the roadmap in `k_printf_hdl_gelistirme_notu.md`.
 
 ---

@@ -4,8 +4,10 @@
 -- (docs/hdl/fmt_isa.md). Verified by the same golden model (the C library) and the
 -- same stimulus/expected vectors as the SV core; the equiv target diffs C = SV = VHDL.
 --
--- Feature slice: LIT, EOM, %c, %s(table-id), %d %i %u %x %X %o %b %B %p, flags
--- - 0 # + space, width 0..63, l (32-bit). Decimal via serial double-dabble.
+-- Features (ISA v2): LIT, EOM, %c, %s(table-id), %d %i %u %x %X %o %b %B %p,
+-- flags - 0 # + space, width AND .precision 0..63 (literal or '*' from an
+-- argument), l (32-bit). Decimal via serial double-dabble. ROM header verified
+-- at run time; invalid msg_id / malformed uop -> drop + sticky err.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -19,6 +21,7 @@ entity kp_core is
         STRTAB_FILE : string  := "str_table.mem";
         MSTART_FILE : string  := "msg_start.mem";
         MARITY_FILE : string  := "msg_arity.mem";
+        ISA_VERSION : integer := 2;
         N_UOPS      : integer := 90;
         LIT_BYTES   : integer := 149;
         STR_BYTES   : integer := 20;
@@ -101,8 +104,12 @@ architecture rtl of kp_core is
     constant B_BIN : unsigned(1 downto 0) := "11";
 
     type state_t is (S_IDLE, S_FETCH, S_LIT, S_NUMSET, S_DD, S_POW2, S_LAYOUT,
-                     S_EMIT, S_STRLD, S_EOM);
+                     S_EMIT, S_STRLD, S_EOM, S_RESOLVE, S_DROP);
     signal st : state_t := S_IDLE;
+
+    -- ROM word 0 must carry this header, or every message is refused (err).
+    constant ROM_HDR : unsigned(31 downto 0) :=
+        x"4B50_0000" or to_unsigned(ISA_VERSION, 32);
 
     type snap_t is array(0 to ARGC_MAX-1) of unsigned(31 downto 0);
     type dig_t  is array(0 to 31) of unsigned(7 downto 0);
@@ -116,6 +123,11 @@ architecture rtl of kp_core is
         else return to_unsigned(16#61# + n - 10, 8); end if;
     end function;
 
+    function sat63(v : unsigned(31 downto 0)) return integer is
+    begin
+        if v > 63 then return 63; else return to_integer(v(5 downto 0)); end if;
+    end function;
+
     -- registers
     signal pc       : integer range 0 to 65535 := 0;
     signal arg_snap : snap_t;
@@ -127,6 +139,9 @@ architecture rtl of kp_core is
     signal cupper   : std_logic;
     signal cflags   : unsigned(4 downto 0);
     signal cwidth   : integer range 0 to 63;
+    signal cpen     : std_logic;                 -- effective precision present
+    signal cprec    : integer range 0 to 63;     -- effective precision value
+    signal vslot    : integer range 0 to 7;      -- derived value slot
     signal dig      : dig_t;
     signal ndig     : integer range 0 to 32;
     signal bcd      : unsigned(39 downto 0);
@@ -170,6 +185,9 @@ begin
         variable j        : integer;
         variable cnt      : integer;
         variable fl       : unsigned(4 downto 0);
+        variable slotv    : integer;
+        variable wa, pa   : unsigned(31 downto 0);
+        variable nde, lz  : integer;
         variable sh, mskn : integer;
         variable dval     : unsigned(3 downto 0);
         variable is_zero  : boolean;
@@ -201,13 +219,20 @@ begin
                             arg_snap(k) <= unsigned(args_flat(k*32+31 downto k*32));
                         end loop;
                         mlen <= (others => '0');
-                        if to_integer(msg_id) >= N_MSGS then
-                            errr <= '1'; st <= S_IDLE;
+                        if uop_rom(0) /= ROM_HDR then
+                            errr <= '1'; st <= S_DROP;  -- wrong ROM image: refuse all
+                        elsif to_integer(msg_id) >= N_MSGS then
+                            errr <= '1'; st <= S_DROP;  -- drop, never hang
                         else
                             pc <= to_integer(msg_start(to_integer(msg_id))(15 downto 0));
                             st <= S_FETCH;
                         end if;
                     end if;
+                -- ----------------------------------------------------------
+                when S_DROP =>
+                    -- one-cycle bounce after refusing a message: exactly one
+                    -- msg_ready pulse pairs with each presented message
+                    st <= S_IDLE;
                 -- ----------------------------------------------------------
                 when S_FETCH =>
                     w  := uop_rom(pc);
@@ -220,23 +245,54 @@ begin
                         st <= S_LIT;
                     when OP_EOM =>
                         st <= S_EOM;
+                    when OP_FMT | OP_CHR | OP_STR =>
+                        st <= S_RESOLVE;
+                    when others =>
+                        errr <= '1'; st <= S_EOM;
+                    end case;
+                -- ----------------------------------------------------------
+                when S_RESOLVE =>
+                    -- shared for FMT/CHR/STR: resolve '*'-sourced width and
+                    -- precision from the leading arg slots ([w][p][value]) and
+                    -- latch effective flags/width/precision + value slot.
+                    slotv := to_integer(uw(18 downto 16));
+                    fl    := uw(9 downto 5);
+                    if uw(26) = '1' then                 -- w_from_arg
+                        wa := arg_snap(slotv); slotv := slotv + 1;
+                        if wa(31) = '1' then             -- negative '*' = LEFT
+                            fl(F_LEFT) := '1';
+                            cwidth <= sat63(0 - wa);
+                        else
+                            cwidth <= sat63(wa);
+                        end if;
+                    else
+                        cwidth <= to_integer(uw(15 downto 10));
+                    end if;
+                    if uw(27) = '1' then                 -- p_from_arg
+                        pa := arg_snap(slotv); slotv := slotv + 1;
+                        if pa(31) = '1' then             -- negative '.*' = none
+                            cpen <= '0'; cprec <= 0;
+                        else
+                            cpen <= '1'; cprec <= sat63(pa);
+                        end if;
+                    else
+                        cpen  <= uw(25);
+                        cprec <= to_integer(uw(24 downto 19));
+                    end if;
+                    cflags  <= fl;
+                    vslot   <= slotv;
+                    sign_ch <= (others => '0');
+                    case uw(31 downto 29) is
                     when OP_FMT =>
                         st <= S_NUMSET;
                     when OP_CHR =>
-                        chr_byte <= arg_snap(to_integer(w(18 downto 16)))(7 downto 0);
-                        cflags   <= w(9 downto 5);
-                        cwidth   <= to_integer(w(15 downto 10));
-                        body_sel <= 1; sign_ch <= (others => '0');
-                        body_len <= 1;
+                        chr_byte <= arg_snap(slotv)(7 downto 0);
+                        body_sel <= 1; body_len <= 1;
                         st <= S_LAYOUT;
-                    when OP_STR =>
-                        cflags   <= w(9 downto 5);
-                        cwidth   <= to_integer(w(15 downto 10));
-                        body_sel <= 2; sign_ch <= (others => '0');
-                        pw_tmp   <= arg_snap(to_integer(w(18 downto 16)));
+                    when others =>                        -- OP_STR
+                        pw_tmp   <= arg_snap(slotv);      -- string-table id
+                        body_sel <= 2;
                         st <= S_STRLD;
-                    when others =>
-                        errr <= '1'; st <= S_EOM;
                     end case;
                 -- ----------------------------------------------------------
                 when S_LIT =>
@@ -253,7 +309,9 @@ begin
                     end if;
                 -- ----------------------------------------------------------
                 when S_STRLD =>
-                    sid := to_integer(pw_tmp) mod N_STRINGS;
+                    -- low 16 bits are enough for the id and avoid the VHDL
+                    -- integer-overflow trap of to_integer on a full 2^32 value
+                    sid := to_integer(pw_tmp(15 downto 0)) mod N_STRINGS;
                     te  := str_table(sid);
                     str_addr <= to_integer(te(15 downto 0));
                     body_len <= to_integer(te(23 downto 16));  -- string length
@@ -261,11 +319,8 @@ begin
                     st <= S_LAYOUT;
                 -- ----------------------------------------------------------
                 when S_NUMSET =>
-                    aslot   := to_integer(uw(18 downto 16));
-                    cur_arg := arg_snap(aslot);
-                    fl := uw(9 downto 5);            -- normalize flag slice to (4 downto 0)
+                    cur_arg := arg_snap(vslot);
                     cbase <= uw(1 downto 0); cupper <= uw(2);
-                    cflags <= fl; cwidth <= to_integer(uw(15 downto 10));
                     if uw(4) = '1' then v := cur_arg;
                     else v := x"0000" & cur_arg(15 downto 0); end if;
                     n := '0';
@@ -278,9 +333,12 @@ begin
                         end if;
                     end if;
                     mag <= v;
+                    -- sign char (cflags resolved in S_RESOLVE). The golden C
+                    -- library applies '+'/' ' to unsigned conversions too (its
+                    -- documented deviation from ISO C) - mirror it exactly.
                     if uw(3) = '1' and n = '1' then sign_ch <= x"2d";
-                    elsif uw(3) = '1' and fl(F_PLUS) = '1' then sign_ch <= x"2b";
-                    elsif uw(3) = '1' and fl(F_SPACE) = '1' then sign_ch <= x"20";
+                    elsif cflags(F_PLUS) = '1' then sign_ch <= x"2b";
+                    elsif cflags(F_SPACE) = '1' then sign_ch <= x"20";
                     else sign_ch <= (others => '0'); end if;
                     bcd <= (others => '0'); ddbin <= v; ddi <= 0;
                     pw_tmp <= v; ndig <= 0; body_sel <= 0;
@@ -325,26 +383,48 @@ begin
                     end if;
                 -- ----------------------------------------------------------
                 when S_LAYOUT =>
+                    -- C fmt_int layout with the precision rules (mirror of the
+                    -- SV core's S_LAYOUT; see src/k_printf.c).
                     if sign_ch /= x"00" then slen := 1; else slen := 0; end if;
                     is_zero := (body_sel = 0) and (mag = 0);
+                    -- precision 0 with value 0 => no digits at all (C rule)
+                    if body_sel = 0 and cpen = '1' and cprec = 0 and mag = 0 then
+                        nde := 0;
+                    else
+                        nde := ndig;
+                    end if;
+                    -- precision = minimum digit count (zero-filled)
+                    if body_sel = 0 and cpen = '1' and cprec > nde then
+                        lz := cprec - nde;
+                    else
+                        lz := 0;
+                    end if;
+                    -- alternate form: hex/bin prefix (nonzero only); octal
+                    -- forces a leading zero unless one already leads
                     pl := 0; p0 := (others => '0'); p1 := (others => '0');
-                    if body_sel = 0 and cflags(F_HASH) = '1' and not is_zero then
-                        if cbase = B_HEX then
+                    if body_sel = 0 and cflags(F_HASH) = '1' then
+                        if cbase = B_HEX and not is_zero then
                             pl := 2; p0 := x"30";
                             if cupper = '1' then p1 := x"58"; else p1 := x"78"; end if;
-                        elsif cbase = B_BIN then
+                        elsif cbase = B_BIN and not is_zero then
                             pl := 2; p0 := x"30";
                             if cupper = '1' then p1 := x"42"; else p1 := x"62"; end if;
                         elsif cbase = B_OCT then
-                            pl := 1; p0 := x"30";
+                            if lz = 0 and not (nde > 0 and mag = 0) then lz := 1; end if;
                         end if;
                     end if;
-                    if body_sel = 0 then blen := ndig;
+                    -- body length per kind; %s truncated by precision
+                    if body_sel = 0 then blen := lz + nde;
                     elsif body_sel = 1 then blen := 1;
-                    else blen := body_len; end if;
+                    else
+                        blen := body_len;
+                        if cpen = '1' and cprec < blen then blen := cprec; end if;
+                    end if;
                     bl  := slen + pl + blen;
                     if cwidth > bl then pad := cwidth - bl; else pad := 0; end if;
-                    zero_ok := (body_sel = 0) and (cflags(F_ZERO) = '1') and (cflags(F_LEFT) = '0');
+                    -- '0' flag: numeric only, not with '-', ignored with precision
+                    zero_ok := (body_sel = 0) and (cflags(F_ZERO) = '1') and
+                               (cflags(F_LEFT) = '0') and (cpen = '0');
                     presp := 0; zp := 0; postsp := 0;
                     if cflags(F_LEFT) = '1' then postsp := pad;
                     elsif zero_ok then zp := pad;
@@ -356,12 +436,12 @@ begin
                     if slen = 1 then fld(idx) <= sign_ch; idx := idx + 1; end if;
                     if pl >= 1 then fld(idx) <= p0; idx := idx + 1; end if;
                     if pl = 2 then fld(idx) <= p1; idx := idx + 1; end if;
-                    for k in 0 to 63 loop
-                        if k < zp then fld(idx) <= x"30"; idx := idx + 1; end if;
+                    for k in 0 to 127 loop
+                        if k < zp + lz then fld(idx) <= x"30"; idx := idx + 1; end if;
                     end loop;
                     if body_sel = 0 then
                         for k in 0 to 31 loop
-                            if k < blen then fld(idx) <= dig(ndig-1-k); idx := idx + 1; end if;
+                            if k < nde then fld(idx) <= dig(nde-1-k); idx := idx + 1; end if;
                         end loop;
                     elsif body_sel = 1 then
                         fld(idx) <= chr_byte; idx := idx + 1;

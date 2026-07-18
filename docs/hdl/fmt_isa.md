@@ -1,4 +1,4 @@
-# k_printf_hdl µop ISA — v1 (frozen)
+# k_printf_hdl µop ISA — v2 (frozen)
 
 The hardware core (`kp_core`) consumes a stream of 32-bit micro-ops (µops) fetched
 from a ROM produced by `tools/k_fmtgen.py` out of `hdl/fmt/messages.h`. This file is
@@ -44,13 +44,38 @@ Plain format text and `%%` are compiled into LIT runs.
 
 ### Shared numeric fields (FMT / STR / CHR)
 
-Flags and width sit at the **same bit positions** in FMT, STR and CHR so the RTL
-decodes them once:
+Flags, width, precision and the `*` markers sit at the **same bit positions** in FMT,
+STR and CHR so the RTL decodes them once:
 
 | bits | field | meaning |
 |------|-------|---------|
 | `[9:5]` | `flags` | bit0 `ZERO` (`0`), bit1 `LEFT` (`-`), bit2 `PLUS` (`+`), bit3 `SPACE` (` `), bit4 `HASH` (`#`) |
 | `[15:10]` | `width` | minimum field width, 0..63 (`G_MAX_FIELD = 63`, documented deviation from C's INT_MAX) |
+| `[18:16]` | `arg_slot` | **first** argument slot of this conversion (see argument order below) |
+| `[24:19]` | `prec` | literal precision 0..63 (valid when `prec_en`) |
+| `[25]` | `prec_en` | a **literal** precision was given (`.N`); for `.*` this bit is 0 and the effective enable is resolved at run time from the argument's sign |
+| `[26]` | `w_from_arg` | width comes from an argument (`*`) |
+| `[27]` | `p_from_arg` | precision comes from an argument (`.*`) |
+| `[28]` | reserved | must be 0 |
+
+**Argument order per conversion** (mirrors the C `va_arg` order): the conversion's
+argument words are laid out sequentially starting at `arg_slot` as
+`[width-arg if w_from_arg][prec-arg if p_from_arg][value]`. The RTL derives the value
+slot as `arg_slot + w_from_arg + p_from_arg`, so consumption is still fixed entirely
+by the compiled µop — a client can never desync it.
+
+**`*` semantics (C mirror, with the field cap):** the width/precision arguments are
+read as **signed 32-bit** regardless of the `size` bit. A negative `*` width acts as
+the `-` flag with the absolute value; a negative `.*` precision means "no precision".
+Magnitudes are saturated to `G_MAX_FIELD = 63`; values beyond that are a **documented
+deviation** from C (the golden-model test generator constrains `*` arguments to the
+supported range).
+
+**Precision semantics (C mirror):** precision is the minimum digit count (zero-filled)
+for numeric conversions and the maximum length for `%s`. `prec==0` with value 0 emits
+no digits. The `0` flag is ignored when a precision is present. `%#o` forces a leading
+zero only when one isn't already first — including the C11 `%#.0o`-of-0 → `"0"` case.
+Precision on `%c` is undefined in C and rejected by `k_fmtgen`.
 
 ### FMT payload (adds, on top of shared fields)
 
@@ -59,39 +84,50 @@ decodes them once:
 | `[1:0]` | `base` | `00`=decimal(10), `01`=hex(16), `10`=octal(8), `11`=binary(2) |
 | `[2]` | `upper` | uppercase digits (`%X`,`%B`) |
 | `[3]` | `is_signed` | signed decimal (`%d`,`%i`) — magnitude via `0 - value` (INT_MIN-safe, C-mirror) |
-| `[4]` | `size32` | `0` = use low 16 bits of the arg slot (sign-extended if `is_signed`); `1` = full 32 bits (`l`) |
-| `[18:16]` | `arg_slot` | which argument word (0..7) feeds this conversion |
+| `[4]` | `size32` | `0` = use low 16 bits of the value slot (sign-extended if `is_signed`); `1` = full 32 bits (`l`) |
 
-For `is_signed=0` the flags `PLUS`/`SPACE` are ignored (C: sign flags apply only to
-signed conversions). `HASH` gives `0x`/`0X` (hex), `0b`/`0B` (binary), a leading `0`
-(octal); suppressed when the value is zero (except octal, which keeps a single `0`).
+`PLUS`/`SPACE` apply to **all** conversions, unsigned included — the golden C library
+(`src/k_printf.c` `fmt_int`) prints the sign character for any non-negative value
+regardless of signedness, which is its own documented deviation from ISO C, and the
+cores mirror the golden exactly (pinned by the `MSG_SIGNU` differential message).
+`HASH` gives `0x`/`0X` (hex), `0b`/`0B` (binary), a leading `0` (octal, via the
+precision path — see above); the hex/binary prefix is suppressed when the value is
+zero. The `h`/`hh` length modifiers are accepted by `k_fmtgen` and ignored (the C
+library does the same; the no-`l` datapath is 16-bit anyway).
 
 ### STR payload
 
-| bits | field | meaning |
-|------|-------|---------|
-| `[18:16]` | `arg_slot` | argument word (0..7) holding the string-table id |
-
-`%s` in this ROM front-end takes its argument as a **string-table id** (the plan's
-runtime-parser `%s`-as-table-id model), not a memory pointer: the argument word selects
-a compile-time entry `str_table[id] = {addr,len}` in the string pool. So `%s` **does**
-consume one argument word (the id), the length is known at compile time (right-justified
-width is free), and there is no NUL-terminated-string lockup class. `ZERO` is ignored for
-`%s` (C rule); `LEFT`/`width` apply. `str_id = 0` is `"(null)"` in the RTL string pool,
-and the C golden passes a NULL `char*` for id 0 — so both sides exercise the library's
-own `(null)` output.
+Uses only the shared fields. `%s` in this ROM front-end takes its argument as a
+**string-table id** (the plan's runtime-parser `%s`-as-table-id model), not a memory
+pointer: the argument word selects a compile-time entry `str_table[id] = {addr,len}`
+in the string pool. So `%s` **does** consume one argument word (the id, at the derived
+value slot), the length is known at compile time (right-justified width is free), and
+there is no NUL-terminated-string lockup class. The id is computed as
+`arg[15:0] mod N_STRINGS` (low 16 bits — keeps the VHDL integer range and the golden
+dispatch exactly aligned). `ZERO` is ignored for `%s` (C rule);
+`LEFT`/`width`/`precision` apply (precision truncates). `str_id = 0` is `"(null)"` in
+the RTL string pool, and the C golden passes a NULL `char*` for id 0 — so both sides
+exercise the library's own `(null)` output.
 
 ### CHR payload
 
-| bits | field | meaning |
-|------|-------|---------|
-| `[18:16]` | `arg_slot` | argument word whose low 8 bits are emitted |
-
-`ZERO` is ignored for `%c`; `LEFT`/`width` apply (space padding).
+Uses only the shared fields (the value slot's low 8 bits are emitted). `ZERO` is
+ignored for `%c`; `LEFT`/`width` (including `*` width) apply with space padding;
+precision is rejected at generation time.
 
 ## Message layout & tables
 
-Messages are laid out sequentially in the µop ROM, each terminated by an `EOM`.
+**Word 0 of the µop ROM is a header**: `0x4B50_0000 | KP_ISA_VERSION` (`"KP"` magic in
+the top 16 bits, version in the low 8). Messages start at word 1; `msg_start` entries
+already include the offset. On the first message accept, the core compares the header
+against its compiled-in expectation and, on mismatch, raises the sticky `err` flag and
+drops every message — the "old ROM image + new RTL" class fails loudly instead of
+printing garbage.
+
+Messages are laid out sequentially after the header, each terminated by an `EOM`.
+The **last message id is a deliberately malformed test message** (a reserved opcode
+followed by `EOM`), exported as `KP_BAD_UOP_MSG_ID`; it is excluded from the golden
+vectors and exists so the testbenches can drive the malformed-µop error path.
 `k_fmtgen.py` also emits:
 
 - `msg_start[msg_id]` → first µop word index of each message.
@@ -101,23 +137,29 @@ Messages are laid out sequentially in the µop ROM, each terminated by an `EOM`.
   guarantee: arg consumption is fixed by the compiled µops, never by runtime data).
 - String pool + `str_table[str_id] = {addr,len}`.
 
-## ROM header / versioning
+## Versioning
 
-`k_fmtgen.py` stamps `KP_ISA_VERSION` (currently **1**) into the generated constant
-headers. The RTL compares its compiled-in `KP_ISA_VERSION` against the ROM's and, on
-mismatch, refuses to run (drives an error status) — this removes the "old ROM image +
-new RTL" silent-failure class.
+`KP_ISA_VERSION` is currently **2** (v2 added the precision/`*` fields in previously
+reserved FMT/STR/CHR payload bits and the ROM header word). `k_fmtgen.py` stamps the
+version into the ROM header (word 0) and the generated constant headers; the RTL
+checks the header at run time as described above.
 
 ## Error behaviour (frozen, so `no-deadlock` can be proved)
 
-- **Invalid `msg_id`** (≥ message count): the message is dropped, a sticky error status
-  bit + `err_cnt` is set, and the engine returns to idle. It never hangs.
-- **Malformed µop** (reserved `op`): same — drop the message, flag error, return to idle.
-- These paths are exercised by directed negative tests (`BAD_MSG`, `BAD_UOP`).
+- **Invalid `msg_id`** (≥ message count) or a **mismatched ROM header**: the message is
+  refused with **zero output handshakes** (a one-cycle drop bounce guarantees exactly
+  one `msg_ready` pulse per presented message), the sticky `err` flag is set, and the
+  engine returns to idle. It never hangs.
+- **Malformed µop** (reserved `op`): the message body is abandoned, `err` is set, and
+  the engine emits the **`out_last` end-of-message marker** (zero data bytes) before
+  returning to idle — observably different from the invalid-`msg_id` case, so a
+  consumer that counts message frames stays aligned.
+- These paths are exercised by directed negative tests (`BAD_MSG`, ready-pulse-train,
+  `BAD_UOP`, post-error recovery).
 
-## Deferred in the current reference slice (Phase-2 hooks)
+## Deferred (Phase-3 hooks)
 
-`.precision`, `*` (arg-sourced width/precision) are **not yet** encoded. Formats using
-them are rejected by `k_fmtgen.py` with a clear error. When added, `precision[5:0]` +
-`prec_en` and `w_from_arg`/`p_from_arg` land in the FMT payload reserved bits, `base`
-stays at `[1:0]`. The frozen positions above do not move.
+The runtime ASCII-format parser front-end, multi-source triggers/arbiter, capture
+(`snprintf`) sink and register-map/AXI front-ends are out of this ISA's scope — they
+sit in front of or behind the µop engine and do not change the encoding. `ll`/64-bit
+and floating point are out of scope entirely (symmetric with the C library).
