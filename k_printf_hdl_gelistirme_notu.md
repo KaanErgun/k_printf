@@ -509,7 +509,7 @@ tutmalıdır.
 ## 8c. Uygulama durumu (2026-07-18, üçüncü tur — v2.2.0): Faz 3 sistem seti
 
 - **Tampon-suz emit** yapıldı (iki dilde): alan sayaçlardan faz-faz akıtılır; `kp_core`
-  artık sentezlenir. **Kalibrasyon (yosys, iCE40): full 2349 LUT4 + 1 BRAM; gated
+  artık sentezlenir. **Kalibrasyon (yosys, iCE40): full 2328 LUT4 + 1 BRAM; gated
   (`G_EN_DEC=0,G_EN_STR=0`) 1836; UART 85.** Full sayı planın 900–1300 hipotez bandının
   ÜSTÜNDE — dürüst kalibrasyon sonucu olarak kaydedildi; küçültme kolları (dig dizisi →
   kaydırıcı, havuzlar → BRAM, mux paylaşımı) gelecek işi.
@@ -524,10 +524,32 @@ tutmalıdır.
 - **Doğrulama:** her koşuda C altınına karşı 304+304 (çekirdek) + 12+12 (UART) +
   53+53 (sistem) + 35+35 (regs) + 52 (konfig) — iki dilde, `make -C hdl test` exit 0.
 - **Bilinçli kapsam dışı (Limitations'ta):** runtime ASCII parser (madde 22 — planda da
-  opsiyonel; formatlar derleme-zamanı), satır-içi `%s` (23), AXI-Lite/Wishbone shimleri
-  (24'ün geri kalanı), async FIFO/`G_DD_PARALLEL`/Vivado IP (25), FuseSoC paketi ve
-  nightly döngüsü (26 — CI'sız projede yerel `fuzz` hedefi karşılıyor), formal/fmax
-  (araç yok). Bunlar plandaki sırasıyla bir sonraki turun adaylarıdır.
+  opsiyonel; formatlar derleme-zamanı), satır-içi `%s` (23), async FIFO/`G_DD_PARALLEL`/
+  Vivado IP (25), FuseSoC paketi ve nightly döngüsü (26 — CI'sız projede yerel `fuzz`
+  hedefi karşılıyor), formal/fmax (araç yok). Bunlar plandaki sırasıyla bir sonraki
+  turun adaylarıdır.
+
+---
+
+## 8d. Uygulama durumu (2026-07-19, dördüncü tur — v2.3.0): bus ön yüzleri + alan lever
+
+Madde 24'ün "kısmen" kalan parçası tamamlandı ve bir güvenli alan-küçültme uygulandı:
+
+- **`kp_axil` (AXI4-Lite) + `kp_wb` (Wishbone B4)** slave adaptörleri (SV+VHDL ikiz):
+  `kp_regs`'in basit `{wen,addr,wdata,rdata}` portunu standart bus el sıkışmasına
+  çevirir (word-adresli; kombinasyonel ready, döngüsüz). Softcore artık çekirdeği
+  doğrudan bir bus'a bağlayabilir. Doğrulama (`kp_bus_tb`, iki dil): her bus üzerinden
+  sürülen mesaj C altınına bayt-bayt eşit + STATUS/ARG read-back doğru (37+37 çek).
+- **Alan lever (güvenli):** birbirini dışlayan `pw_tmp`/`ddbin` datapath register'ları
+  birleştirildi (double-dabble ile pow2/string asla aynı anda canlı değil): kp_core
+  **2349 → 2328 SB_LUT4**, diferansiyel doğrulandı. Büyük lever'lar (dig dizisi →
+  kaydırıcı, havuzlar → BRAM) yeşil datapath'i sarsmamak için ertelendi — engel değil.
+- **Makefile düzeltmesi:** `make -C hdl fuzz` artık `hdl/gen`'i tutarlı bırakıyor
+  (`expected.txt`'i de yeniden üretir); `make clean` `gen_min`'i de siler. (Adversaryal
+  turun yakaladığı bir tutarsızlık.)
+- **Doğrulama:** `make -C hdl test` exit 0 — 304+304 core, 12+12 UART, 53+53 sys,
+  35+35 regs, **37+37 bus**, 52 config (iki dilde). Kalan bilinçli kapsam dışı: runtime
+  parser, satır-içi `%s`, FuseSoC, formal/fmax (araç yok).
 
 ---
 

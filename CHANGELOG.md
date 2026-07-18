@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-07-19
+
+No C library behaviour changes — the bump adds the HDL bus front-ends and a size lever.
+
+### HDL
+- **`kp_axil`** (AXI4-Lite) and **`kp_wb`** (Wishbone B4) slave adapters over `kp_regs`,
+  both languages: a softcore can now drop the register window onto a standard bus.
+  Verified end-to-end (`kp_bus_tb`, SV+VHDL): a message driven over each bus comes out
+  byte-for-byte equal to the C golden, and register read-back (STATUS/ARG) is correct.
+- **Area lever**: merged the mutually-exclusive `pw_tmp`/`ddbin` datapath registers
+  (double-dabble vs pow2/string are never live together): `kp_core` 2349 → **2328
+  SB_LUT4** on iCE40, differential-verified. Larger levers stay documented as future
+  work.
+- **Fix**: `make -C hdl fuzz` now restores `hdl/gen/` to a consistent default state
+  (regenerates `expected.txt`, not just `vectors.txt`) so a later manual sim can't read
+  a stale golden. `make clean` also clears `hdl/gen_min/`.
+- New local targets `sim-bus-sv` / `sim-bus-vhdl`, wired into `make -C hdl test`.
+
 ## [2.2.0] - 2026-07-18
 
 No C library behaviour changes — the bump covers the HDL Phase-3 system feature set.
@@ -11,7 +29,7 @@ No C library behaviour changes — the bump covers the HDL Phase-3 system featur
 ### HDL
 - **Buffer-free emit refactor**: the core streams each field phase-by-phase from
   counters instead of materializing it — `kp_core` now synthesizes. Calibration
-  (yosys, iCE40): full **2349 SB_LUT4** + 1 BRAM, gated **1836**, UART 85. The
+  (yosys, iCE40): full **2328 SB_LUT4** + 1 BRAM, gated **1836**, UART 85. The
   full-core number exceeds the plan's 900–1300 hypothesis; reduction levers are
   documented as future work.
 - **`kp_trig`** (both languages): N-source hardware triggers with a one-cycle atomic

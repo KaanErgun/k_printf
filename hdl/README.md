@@ -55,15 +55,18 @@ the arguments travel at run time.
   `k_printf_hw.h` bridge (written to `hdl/gen/` by `make -C hdl fmtgen`): message ids +
   arity table + an inline poll-then-fire sender — printf with the format strings
   compiled out of the firmware entirely.
+- **Bus front-ends** (`kp_axil`, `kp_wb`): thin **AXI4-Lite** and **Wishbone B4**
+  slave adapters over `kp_regs`, so a softcore drops the core onto a standard bus. Both
+  translate the bus handshake to `kp_regs`' simple `{wen,addr,wdata,rdata}` port
+  (word-addressed); `kp_regs` still owns write-to-fire SEND and the arg snapshot.
 - **Feature gates** (`G_EN_DEC`, `G_EN_STR` — the `K_PRINTF_ENABLE_*` analogue): with
   a gate at 0 the FSM branch is unreachable and synthesis prunes the datapath
-  (measured: 2349 → 1836 LUT4). `k_fmtgen --disable` keeps the ROM consistent; a
+  (measured: 2328 → 1836 LUT4). `k_fmtgen --disable` keeps the ROM consistent; a
   gated-off µop reaching the core is treated as malformed (defense in depth).
 
 Not yet (documented so this doesn't over-claim): runtime ASCII-format front-end
-(optional in the plan; formats are compile-time here), AXI-Lite/Wishbone shims over
-`kp_regs`, formal (sby), nextpnr fmax. `%f/%e/%g`, `%n`, 64-bit are out of scope
-(symmetric with the C library).
+(optional in the plan; formats are compile-time here), formal (sby), nextpnr fmax.
+`%f/%e/%g`, `%n`, 64-bit are out of scope (symmetric with the C library).
 
 ## Layout
 
@@ -72,7 +75,7 @@ hdl/
   fmt/messages.h        single source of truth: the example message set (X-macro)
   fmt/messages_min.h    reduced set for the G_EN_* opt-out config test
   rtl/sv/               kp_core.sv  kp_uart_tx.sv  kp_trig.sv  kp_tee.sv
-                        kp_capture.sv  kp_regs.sv
+                        kp_capture.sv  kp_regs.sv  kp_axil.sv  kp_wb.sv
   rtl/vhdl/             VHDL-2008 twins, structural mirror (same names/ports/FSMs)
   tb/kp_tb.sv/.vhd      core differential TB (back-pressure + negative tests)
   tb/kp_uart_tb.sv/.vhd system chain: core -> UART, serial line sampled at real
@@ -80,6 +83,7 @@ hdl/
   tb/kp_sys_tb.sv/.vhd  trig -> core -> tee -> 2x capture (atomic snapshot,
                         round-robin vs golden, DROP counting, tee equality)
   tb/kp_regs_tb.sv/.vhd register window: write-to-fire, STATUS contract, overflow
+  tb/kp_bus_tb.sv/.vhd  AXI4-Lite + Wishbone -> kp_regs -> core -> capture vs golden
   tb/run_ghdl.sh        GHDL analyze+elaborate+run (with an Apple-Silicon fallback)
   gold/kp_gold.c        golden harness: links the real k_printf, prints oracle bytes
   gen/                  GENERATED (mem images, headers, dispatch, vectors, hw header)
@@ -103,6 +107,7 @@ make -C hdl equiv       # triple-diff: C = SV = VHDL
 make -C hdl sim-uart-sv sim-uart-vhdl   # core -> UART, real-bit-time serial check
 make -C hdl sim-sys-sv sim-sys-vhdl     # trig -> core -> tee -> captures
 make -C hdl sim-regs-sv sim-regs-vhdl   # register window (write-to-fire)
+make -C hdl sim-bus-sv sim-bus-vhdl     # AXI4-Lite + Wishbone front-ends
 make -C hdl config-test                 # G_EN_DEC=0,G_EN_STR=0 matrix run
 make -C hdl fuzz FUZZ_SEED=123 FUZZ_N=48  # same differential, fresh random vectors
 ```
@@ -166,14 +171,19 @@ mismatched ROM with the sticky `err` flag — no silent "old ROM, new RTL" runs.
   while the queued message is still delivered; and an **arg-snapshot** test that
   poisons the ARG registers while a message is queued and checks the delivered bytes
   still carry the fire-time args.
+- ✅ Bus front-ends verified in both languages (`kp_bus_tb`): driving `kp_regs` over
+  **AXI4-Lite** and over **Wishbone** each emits the message byte-for-byte equal to the
+  golden, and register read-back (STATUS + an ARG) returns the right values.
 - ✅ Config matrix (`config-test`): reduced message set (`--disable dec,oct,bin,str,ptr`)
   against a core elaborated with `G_EN_DEC=0, G_EN_STR=0` — differential green.
-- ✅ Synthesis (yosys 0.67, iCE40): `kp_core` full = **2349 SB_LUT4** + 1 BRAM;
+- ✅ Synthesis (yosys 0.67, iCE40): `kp_core` full = **2328 SB_LUT4** + 1 BRAM;
   gated (`G_EN_DEC=0,G_EN_STR=0`) = **1836 SB_LUT4** (the gates genuinely prune);
-  `kp_uart_tx` = **85 SB_LUT4**. The full-core number is **above** the plan's
-  900–1300 hypothesis band — recorded as the honest calibration result; known
-  reduction levers (digit array → shift register, pools → BRAM, mux sharing) are
-  future optimization work, not blockers.
+  `kp_uart_tx` = **85 SB_LUT4**. The full-core number is still **above** the plan's
+  900–1300 hypothesis band — recorded as the honest calibration result. One safe
+  size lever was applied (merging the mutually-exclusive `pw_tmp`/`ddbin` datapath
+  registers: 2349 → 2328, differential-verified); the larger levers (digit array →
+  shift register, string/lit pools → BRAM, mux sharing) are deferred so as not to
+  destabilize the fully-green datapath, not blockers.
 - ⚠️ Not covered locally: formal (sby) and nextpnr fmax (tools not installed);
   Verilator/nvc alternates; on-silicon bring-up.
 

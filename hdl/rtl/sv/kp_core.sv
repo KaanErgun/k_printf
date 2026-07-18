@@ -10,9 +10,9 @@
 // via serial double-dabble (no divider). ROM header (magic+version) verified at
 // run time; invalid msg_id / malformed uop -> drop + sticky err, never hangs.
 //
-// Style note: this reference assembles each field into a small buffer and
-// streams it - correctness first; the plan's buffer-free emit refactor (needed
-// before kp_core itself synthesizes practically) is the next step.
+// Emit is buffer-free: the field is streamed phase-by-phase from counters
+// (S_LAYOUT loads them, S_EMIT drains them), so kp_core synthesizes - no field
+// byte-buffer that would explode into muxes. Verified against the C golden.
 `default_nettype none
 
 module kp_core #(
@@ -115,7 +115,6 @@ module kp_core #(
     reg [7:0]  dig [0:31];         // ascii digits, LSB-first
     reg [5:0]  ndig;
     reg [39:0] bcd;
-    reg [31:0] ddbin;
     reg [5:0]  ddi;
     reg [31:0] pw_tmp;
 
@@ -295,8 +294,7 @@ module kp_core #(
                     else if (cflags[F_SPACE])             sign_ch <= 8'h20; // ' '
                     else                                  sign_ch <= 8'd0;
                     // prep converters
-                    bcd <= 40'd0; ddbin <= v; ddi <= 6'd0;
-                    pw_tmp <= v; ndig <= 6'd0;
+                    bcd <= 40'd0; pw_tmp <= v; ddi <= 6'd0; ndig <= 6'd0;
                     body_sel <= 2'd0;
                 end
                 if (base == B_DEC) begin
@@ -326,8 +324,8 @@ module kp_core #(
                         c = bcd;
                         for (j = 0; j <= 9; j = j+1)
                             if (c[j*4 +: 4] >= 5) c[j*4 +: 4] = c[j*4 +: 4] + 4'd3;
-                        bcd   <= {c[38:0], ddbin[31]};
-                        ddbin <= {ddbin[30:0], 1'b0};
+                        bcd    <= {c[38:0], pw_tmp[31]};
+                        pw_tmp <= {pw_tmp[30:0], 1'b0};
                     end
                     ddi <= ddi + 6'd1;
                 end

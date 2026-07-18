@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(k_printf VERSION 2.2.0 LANGUAGES C)
+project(k_printf VERSION 2.3.0 LANGUAGES C)
 
 # Static library
 add_library(k_printf STATIC src/k_printf.c)

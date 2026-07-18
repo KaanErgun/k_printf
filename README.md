@@ -7,7 +7,7 @@ at a time through a callback you supply.
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-MSP430-blue)
 ![Language](https://img.shields.io/badge/language-C-lightgrey)
-![Version](https://img.shields.io/badge/version-2.2.0-orange)
+![Version](https://img.shields.io/badge/version-2.3.0-orange)
 
 > This is the canonical README. A Turkish summary lives in
 > [docs/README.tr.md](docs/README.tr.md) (may lag behind this file).
@@ -240,12 +240,12 @@ make -C hdl test     # k_fmtgen -> golden -> SV+VHDL diff -> triple-diff -> UART
 
 Current status (Phase 3): the full formatting feature set (`%d %i %u %x %X %o %b %B
 %p %c %s %%`, flags, width/`.precision` incl. `*`, `l`), synthesizable buffer-free
-core (2349 LUT4 on iCE40, feature gates prune to 1836), UART sink, **multi-source
+core (2328 LUT4 on iCE40, feature gates prune to 1836), UART sink, **multi-source
 triggers with one-cycle atomic snapshot + arbiter**, capture/tee sinks, and a
-**register-window front-end** with a generated `k_printf_hw.h` softcore bridge.
-Everything is verified byte-for-byte against this C library (both languages,
-back-pressure, negative tests, config matrix). See [hdl/README.md](hdl/README.md)
-and the roadmap in `k_printf_hdl_gelistirme_notu.md`.
+**register-window front-end** (with **AXI4-Lite + Wishbone** adapters and a generated
+`k_printf_hw.h` softcore bridge). Everything is verified byte-for-byte against this C
+library (both languages, back-pressure, negative tests, bus front-ends, config matrix).
+See [hdl/README.md](hdl/README.md) and the roadmap in `k_printf_hdl_gelistirme_notu.md`.
 
 ---
 

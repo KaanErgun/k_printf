@@ -16,8 +16,10 @@ PASS=${2:-"VHDL-DIFF: PASS"}
 
 WORK=hdl/gen/ghdl
 SRC="hdl/gen/kp_msgs_pkg.vhd hdl/rtl/vhdl/kp_core.vhd hdl/rtl/vhdl/kp_uart_tx.vhd \
-     hdl/rtl/vhdl/kp_trig.vhd hdl/rtl/vhdl/kp_tee.vhd hdl/rtl/vhdl/kp_capture.vhd hdl/rtl/vhdl/kp_regs.vhd \
-     hdl/tb/kp_tb.vhd hdl/tb/kp_uart_tb.vhd hdl/tb/kp_sys_tb.vhd hdl/tb/kp_regs_tb.vhd"
+     hdl/rtl/vhdl/kp_trig.vhd hdl/rtl/vhdl/kp_tee.vhd hdl/rtl/vhdl/kp_capture.vhd \
+     hdl/rtl/vhdl/kp_regs.vhd hdl/rtl/vhdl/kp_axil.vhd hdl/rtl/vhdl/kp_wb.vhd \
+     hdl/tb/kp_tb.vhd hdl/tb/kp_uart_tb.vhd hdl/tb/kp_sys_tb.vhd hdl/tb/kp_regs_tb.vhd \
+     hdl/tb/kp_bus_tb.vhd"
 STD="--std=08 -frelaxed"
 mkdir -p "$WORK"
 

@@ -163,9 +163,9 @@ checks the header at run time as described above.
 ## Front-/back-ends outside this ISA
 
 The multi-source triggers/arbiter (`kp_trig`), capture (`snprintf`) sink (`kp_capture`),
-tee (`kp_tee`) and the register-window front-end (`kp_regs`) sit in front of or behind
-the µop engine and **do not change the encoding** — they are implemented (both
-languages) as of v2.2.0. A runtime ASCII-format parser front-end and AXI-Lite/Wishbone
-shims over `kp_regs` remain optional/future and likewise would not touch the ISA.
-`ll`/64-bit
+tee (`kp_tee`), the register-window front-end (`kp_regs`) and its **AXI4-Lite / Wishbone
+adapters** (`kp_axil` / `kp_wb`) sit in front of or behind the µop engine and **do not
+change the encoding** — they are implemented (both languages) as of v2.3.0. A runtime
+ASCII-format parser front-end remains optional/future and likewise would not touch the
+ISA. `ll`/64-bit
 and floating point are out of scope entirely (symmetric with the C library).

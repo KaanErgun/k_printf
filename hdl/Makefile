@@ -34,8 +34,8 @@ SVDEFS := $(addprefix -D,$(MEMS)) \
           -DOUT_FILE=\"$(GEN)/sv_out.txt\"
 
 .PHONY: all test fmtgen gold sim-sv sim-vhdl sim-uart-sv sim-uart-vhdl \
-        sim-sys-sv sim-sys-vhdl sim-regs-sv sim-regs-vhdl config-test \
-        equiv fuzz clean
+        sim-sys-sv sim-sys-vhdl sim-regs-sv sim-regs-vhdl \
+        sim-bus-sv sim-bus-vhdl config-test equiv fuzz clean
 
 all: test
 
@@ -99,6 +99,18 @@ sim-regs-sv: gold
 sim-regs-vhdl: gold
 	cd $(ROOT) && sh hdl/tb/run_ghdl.sh kp_regs_tb "REGS-DIFF: PASS"
 
+# ---- bus front-ends: AXI4-Lite + Wishbone over kp_regs ----
+sim-bus-sv: gold
+	cd $(ROOT) && $(IVERILOG) -g2012 -grelative-include -I$(GEN) $(SVDEFS) \
+	    -o $(GEN)/kp_bus_tb.vvp \
+	    hdl/rtl/sv/kp_core.sv hdl/rtl/sv/kp_regs.sv hdl/rtl/sv/kp_axil.sv \
+	    hdl/rtl/sv/kp_wb.sv hdl/rtl/sv/kp_capture.sv hdl/tb/kp_bus_tb.sv
+	cd $(ROOT) && $(VVP) $(GEN)/kp_bus_tb.vvp | tee $(GEN)/bus_sv_run.log
+	cd $(ROOT) && grep -q "BUS-DIFF: PASS" $(GEN)/bus_sv_run.log
+
+sim-bus-vhdl: gold
+	cd $(ROOT) && sh hdl/tb/run_ghdl.sh kp_bus_tb "BUS-DIFF: PASS"
+
 # ---- G_EN_* opt-out config: reduced message set, gated core (SV matrix run) --
 GENMIN := hdl/gen_min
 config-test:
@@ -124,7 +136,7 @@ FUZZ_N    ?= 48
 fuzz:
 	$(MAKE) -C $(ROOT)/hdl sim-sv sim-vhdl equiv \
 	    FMTGEN_ARGS="--seed $(FUZZ_SEED) --nrandom $(FUZZ_N)"
-	cd $(ROOT) && python3 tools/k_fmtgen.py hdl/fmt/messages.h -o $(GEN)
+	$(MAKE) -C $(ROOT)/hdl gold     # restore gen/ to the default seed (vectors+expected)
 
 # ---- triple equivalence: C = SV = VHDL (case-insensitive on the hex dump) ----
 equiv: sim-sv sim-vhdl
@@ -139,8 +151,8 @@ equiv: sim-sv sim-vhdl
 	  fi
 
 test: equiv sim-uart-sv sim-uart-vhdl sim-sys-sv sim-sys-vhdl \
-      sim-regs-sv sim-regs-vhdl config-test
-	@echo "k_printf_hdl: all local checks passed (core diff + equiv, UART, trig/tee/capture, regs, config matrix)."
+      sim-regs-sv sim-regs-vhdl sim-bus-sv sim-bus-vhdl config-test
+	@echo "k_printf_hdl: all local checks passed (core diff + equiv, UART, trig/tee/capture, regs, AXI-Lite+WB, config matrix)."
 
 clean:
 	cd $(ROOT) && rm -rf $(GEN)/* $(GENMIN)/* 2>/dev/null || true

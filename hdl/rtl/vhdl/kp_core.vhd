@@ -147,7 +147,6 @@ architecture rtl of kp_core is
     signal dig      : dig_t;
     signal ndig     : integer range 0 to 32;
     signal bcd      : unsigned(39 downto 0);
-    signal ddbin    : unsigned(31 downto 0);
     signal ddi      : integer range 0 to 32;
     signal pw_tmp   : unsigned(31 downto 0);
     signal sign_ch  : unsigned(7 downto 0);
@@ -352,7 +351,7 @@ begin
                     elsif cflags(F_PLUS) = '1' then sign_ch <= x"2b";
                     elsif cflags(F_SPACE) = '1' then sign_ch <= x"20";
                     else sign_ch <= (others => '0'); end if;
-                    bcd <= (others => '0'); ddbin <= v; ddi <= 0;
+                    bcd <= (others => '0'); ddi <= 0;
                     pw_tmp <= v; ndig <= 0; body_sel <= 0;
                     if uw(1 downto 0) = B_DEC then
                         if G_EN_DEC = 0 then
@@ -382,8 +381,8 @@ begin
                                 c(jj*4+3 downto jj*4) := c(jj*4+3 downto jj*4) + 3;
                             end if;
                         end loop;
-                        bcd   <= c(38 downto 0) & ddbin(31);
-                        ddbin <= ddbin(30 downto 0) & '0';
+                        bcd    <= c(38 downto 0) & pw_tmp(31);
+                        pw_tmp <= pw_tmp(30 downto 0) & '0';
                         ddi <= ddi + 1;
                     end if;
                 -- ----------------------------------------------------------
