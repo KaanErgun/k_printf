@@ -16,6 +16,7 @@ docs/doxygen/
 
 # HDL generated + simulation artifacts (regenerate with `make -C hdl`)
 hdl/gen/
+hdl/gen_min/
 e~*.lst
 work-obj*.cf
 

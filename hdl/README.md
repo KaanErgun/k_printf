@@ -11,9 +11,11 @@ both HDL cores are checked byte-for-byte against it. Formatting is deferred the 
 `defmt`/`Trice` do it — formats are compiled to a micro-op ROM at build time, and only
 the arguments travel at run time.
 
-> Status: **Phase-2 feature set** (see the roadmap in
+> Status: **Phase-3 system feature set** (see the roadmap in
 > [`k_printf_hdl_gelistirme_notu.md`](../k_printf_hdl_gelistirme_notu.md)). Working and
-> locally verified end-to-end, including the UART system chain.
+> locally verified end-to-end: formatting core (buffer-free, synthesizable),
+> UART chain, multi-source triggers + arbiter, capture/tee sinks, and a
+> register-window front-end for softcore clients.
 
 ## What it does
 
@@ -34,30 +36,55 @@ the arguments travel at run time.
   µop ROM carries a magic+version header; a mismatched ROM is refused with `err`.
 - **UART sink** (`kp_uart_tx`, both languages): 8N1, fractional (N.F) baud
   accumulator — no derived clock, the RTL echo of MSP430's `UCBRS` modulation.
+- **Multi-source triggers** (`kp_trig`): N `{trig, msg_id, args}` sources; arguments
+  are captured in a **one-cycle atomic snapshot** (the guarantee software printf can
+  never give), then a round-robin, message-granular arbiter feeds the core — bytes of
+  different sources never interleave (the structural `k_printf_lock`). A source that
+  re-fires while its slot is in flight is counted in its saturating `dropped_cnt`
+  (the plan's DROP policy for hardware sources).
+- **Capture sink** (`kp_capture`): the `k_snprintf` analogue — stores the stream into
+  a RAM (truncating at DEPTH, still counting) and counts completed messages.
+- **Tee** (`kp_tee`): broadcast one stream to two sinks (the `k_fprintf` multi-sink
+  idea, e.g. UART + capture at once). A registered fork holds each byte until both
+  sinks accept it — `a_valid`/`b_valid` depend only on `in_valid` and internal state,
+  so there is no combinational `valid`↔`ready` loop (safe with ready-when-valid sinks).
+- **Register window** (`kp_regs`): ARG0..7 + **write-to-fire SEND** (the SEND write is
+  the trigger — no set-id/go race) + STATUS (pend/err/overflow-count). ARG registers are
+  **snapshotted when SEND fires**, so a message that is queued while the core is busy is
+  immune to later ARG writes (matching `kp_trig`). Softcore clients use the generated
+  `k_printf_hw.h` bridge (written to `hdl/gen/` by `make -C hdl fmtgen`): message ids +
+  arity table + an inline poll-then-fire sender — printf with the format strings
+  compiled out of the firmware entirely.
+- **Feature gates** (`G_EN_DEC`, `G_EN_STR` — the `K_PRINTF_ENABLE_*` analogue): with
+  a gate at 0 the FSM branch is unreachable and synthesis prunes the datapath
+  (measured: 2349 → 1836 LUT4). `k_fmtgen --disable` keeps the ROM consistent; a
+  gated-off µop reaching the core is treated as malformed (defense in depth).
 
-Not yet (Phase-3 hooks, documented so this doesn't over-claim): runtime ASCII-format
-front-end, multi-source triggers + arbiter, capture/snprintf sink, register-map/AXI
-front-ends. `%f/%e/%g`, `%n`, 64-bit are out of scope (symmetric with the C library).
+Not yet (documented so this doesn't over-claim): runtime ASCII-format front-end
+(optional in the plan; formats are compile-time here), AXI-Lite/Wishbone shims over
+`kp_regs`, formal (sby), nextpnr fmax. `%f/%e/%g`, `%n`, 64-bit are out of scope
+(symmetric with the C library).
 
 ## Layout
 
 ```
 hdl/
   fmt/messages.h        single source of truth: the example message set (X-macro)
-  rtl/sv/kp_core.sv     SystemVerilog core
-  rtl/sv/kp_uart_tx.sv  SystemVerilog UART TX (8N1, fractional baud)
-  rtl/vhdl/kp_core.vhd  VHDL-2008 twin (structural mirror: same entity/ports/FSM)
-  rtl/vhdl/kp_uart_tx.vhd  VHDL-2008 UART TX twin
-  tb/kp_tb.sv           Icarus testbench (differential vs C golden, back-pressure,
-                        directed negative tests)
-  tb/kp_tb.vhd          GHDL testbench (ditto, incl. back-pressure + negatives)
+  fmt/messages_min.h    reduced set for the G_EN_* opt-out config test
+  rtl/sv/               kp_core.sv  kp_uart_tx.sv  kp_trig.sv  kp_tee.sv
+                        kp_capture.sv  kp_regs.sv
+  rtl/vhdl/             VHDL-2008 twins, structural mirror (same names/ports/FSMs)
+  tb/kp_tb.sv/.vhd      core differential TB (back-pressure + negative tests)
   tb/kp_uart_tb.sv/.vhd system chain: core -> UART, serial line sampled at real
                         bit times by an independent receiver model
+  tb/kp_sys_tb.sv/.vhd  trig -> core -> tee -> 2x capture (atomic snapshot,
+                        round-robin vs golden, DROP counting, tee equality)
+  tb/kp_regs_tb.sv/.vhd register window: write-to-fire, STATUS contract, overflow
   tb/run_ghdl.sh        GHDL analyze+elaborate+run (with an Apple-Silicon fallback)
   gold/kp_gold.c        golden harness: links the real k_printf, prints oracle bytes
-  gen/                  GENERATED (mem images, headers, dispatch, vectors) — see below
+  gen/                  GENERATED (mem images, headers, dispatch, vectors, hw header)
   Makefile              local verification targets
-tools/k_fmtgen.py       messages.h -> uop ROM / pools / dispatch / vectors
+tools/k_fmtgen.py       messages.h -> uop ROM / pools / dispatch / vectors / k_printf_hw.h
 docs/hdl/fmt_isa.md     the frozen micro-op ISA (v2)
 ```
 
@@ -66,14 +93,17 @@ docs/hdl/fmt_isa.md     the frozen micro-op ISA (v2)
 Everything is local, symmetric with the C side's `make test`:
 
 ```bash
-make -C hdl test        # fmtgen -> gold -> SV + VHDL diff -> triple-diff -> UART chain
+make -C hdl test        # everything: core diff + equiv, UART, sys, regs, config
 # or individually:
 make -C hdl fmtgen      # regenerate hdl/gen/ from messages.h
-make -C hdl gold        # build the C golden and emit expected.txt
+make -C hdl gold        # build the C golden, emit expected.txt, check k_printf_hw.h
 make -C hdl sim-sv      # Icarus: SV core byte-for-byte vs the C library
 make -C hdl sim-vhdl    # GHDL:  VHDL core byte-for-byte vs the C library
 make -C hdl equiv       # triple-diff: C = SV = VHDL
 make -C hdl sim-uart-sv sim-uart-vhdl   # core -> UART, real-bit-time serial check
+make -C hdl sim-sys-sv sim-sys-vhdl     # trig -> core -> tee -> captures
+make -C hdl sim-regs-sv sim-regs-vhdl   # register window (write-to-fire)
+make -C hdl config-test                 # G_EN_DEC=0,G_EN_STR=0 matrix run
 make -C hdl fuzz FUZZ_SEED=123 FUZZ_N=48  # same differential, fresh random vectors
 ```
 
@@ -115,22 +145,37 @@ mismatched ROM with the sticky `err` flag — no silent "old ROM, new RTL" runs.
 ## Verification status (honest)
 
 - ✅ 300 differential vectors (directed + seeded-random, covering precision/`*`
-  torture formats), SV and VHDL each byte-for-byte equal to the C golden; plus a
+  torture formats), SV and VHDL each byte-for-byte equal to the C golden; plus
   fresh-seed `fuzz` re-runs (700+ vectors) — all green.
 - ✅ Triple-diff C = SV = VHDL, with randomized back-pressure on **both** TBs (SV LFSR,
   VHDL LFSR, alternating per message) — the byte stream is proven independent of
   `ready` timing.
 - ✅ Directed negative tests in both TBs: invalid `msg_id` (silent drop + `err`),
-  the ready-pulse-train check (no consecutive `msg_ready` on the drop path — a duplicate pulse could swallow a later message), malformed µop (`err` + EOM marker, zero data bytes), and post-error recovery.
-- ✅ System chain verified in both languages: core → `kp_uart_tx` → serial line sampled
-  at real bit times by an independent receiver model (12 messages, framing checked).
-- ✅ First synthesis calibration: `kp_uart_tx` = **85 SB_LUT4** on iCE40 (yosys 0.67).
-- ⚠️ `kp_core` itself is **not yet practically synthesizable**: the reference
-  implementation assembles each field into a 96-byte buffer, whose guarded-write loops
-  explode into a mux network that yosys chews on for >10 min. This is exactly the
-  plan's Phase-2 "buffer-free emit" refactor (stream the field phase-by-phase with
-  counters instead of materializing it); until then the area budget for the core stays
-  a hypothesis. Simulation semantics are unaffected.
+  the ready-pulse-train check (no consecutive `msg_ready` on the drop path — a
+  duplicate pulse could swallow a later message), malformed µop (`err` + EOM marker,
+  zero data bytes), and post-error recovery.
+- ✅ UART chain verified in both languages: core → `kp_uart_tx` → serial line sampled
+  at real bit times by an independent receiver model (framing checked).
+- ✅ System chain verified in both languages (`kp_sys_tb`): two triggers firing in the
+  **same cycle** both come out complete and in round-robin order, byte-for-byte equal
+  to the golden; tee sinks identical; `dropped_cnt` counts a re-fire exactly once. The
+  trigger inputs are **poisoned right after the pulse**, so the test actually
+  discriminates the one-cycle atomic snapshot (a live-read design would emit garbage).
+- ✅ Register window verified in both languages (`kp_regs_tb`): write-to-fire output
+  equals the golden; STATUS.pend contract; SEND-while-pending counted as overflow
+  while the queued message is still delivered; and an **arg-snapshot** test that
+  poisons the ARG registers while a message is queued and checks the delivered bytes
+  still carry the fire-time args.
+- ✅ Config matrix (`config-test`): reduced message set (`--disable dec,oct,bin,str,ptr`)
+  against a core elaborated with `G_EN_DEC=0, G_EN_STR=0` — differential green.
+- ✅ Synthesis (yosys 0.67, iCE40): `kp_core` full = **2349 SB_LUT4** + 1 BRAM;
+  gated (`G_EN_DEC=0,G_EN_STR=0`) = **1836 SB_LUT4** (the gates genuinely prune);
+  `kp_uart_tx` = **85 SB_LUT4**. The full-core number is **above** the plan's
+  900–1300 hypothesis band — recorded as the honest calibration result; known
+  reduction levers (digit array → shift register, pools → BRAM, mux sharing) are
+  future optimization work, not blockers.
+- ⚠️ Not covered locally: formal (sby) and nextpnr fmax (tools not installed);
+  Verilator/nvc alternates; on-silicon bring-up.
 
 ## License
 

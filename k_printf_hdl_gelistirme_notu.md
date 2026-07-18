@@ -506,6 +506,31 @@ tutmalıdır.
 
 ---
 
+## 8c. Uygulama durumu (2026-07-18, üçüncü tur — v2.2.0): Faz 3 sistem seti
+
+- **Tampon-suz emit** yapıldı (iki dilde): alan sayaçlardan faz-faz akıtılır; `kp_core`
+  artık sentezlenir. **Kalibrasyon (yosys, iCE40): full 2349 LUT4 + 1 BRAM; gated
+  (`G_EN_DEC=0,G_EN_STR=0`) 1836; UART 85.** Full sayı planın 900–1300 hipotez bandının
+  ÜSTÜNDE — dürüst kalibrasyon sonucu olarak kaydedildi; küçültme kolları (dig dizisi →
+  kaydırıcı, havuzlar → BRAM, mux paylaşımı) gelecek işi.
+- **`kp_trig`** (madde 20): N kaynaklı tetik, 1-çevrim atomik snapshot, round-robin
+  mesaj-taneli arbiter, kaynak başına doyumlu `dropped_cnt` (DROP politikası).
+- **`kp_capture` + `kp_tee`** (madde 21): k_snprintf ve k_fprintf eşlenikleri.
+- **`kp_regs`** (madde 24'ün çekirdeği): ARG0..7 + write-to-fire SEND + STATUS
+  (pend/err/overflow); üretilen **`k_printf_hw.h`** C köprüsü (id + arity + inline
+  poll-then-fire) — softcore, format stringlerini hiç taşımaz.
+- **`G_EN_*` kapıları** (madde 15): RTL generic + `k_fmtgen --disable` + indirgenen
+  mesaj setiyle konfig-matrisi diferansiyeli; sentezde gerçek budama ölçüldü.
+- **Doğrulama:** her koşuda C altınına karşı 304+304 (çekirdek) + 12+12 (UART) +
+  53+53 (sistem) + 35+35 (regs) + 52 (konfig) — iki dilde, `make -C hdl test` exit 0.
+- **Bilinçli kapsam dışı (Limitations'ta):** runtime ASCII parser (madde 22 — planda da
+  opsiyonel; formatlar derleme-zamanı), satır-içi `%s` (23), AXI-Lite/Wishbone shimleri
+  (24'ün geri kalanı), async FIFO/`G_DD_PARALLEL`/Vivado IP (25), FuseSoC paketi ve
+  nightly döngüsü (26 — CI'sız projede yerel `fuzz` hedefi karşılıyor), formal/fmax
+  (araç yok). Bunlar plandaki sırasıyla bir sonraki turun adaylarıdır.
+
+---
+
 ## 9. Riskler ve Açık Sorular
 
 | Konu | Risk | Önlem / karar mekanizması |

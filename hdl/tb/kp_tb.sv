@@ -13,6 +13,13 @@
 module kp_tb;
     localparam int ARGC_MAX = 8;
 `include "kp_msgs.svh"
+// feature-gate overrides for the config-matrix run (default: all on)
+`ifndef KP_EN_DEC
+`define KP_EN_DEC 1
+`endif
+`ifndef KP_EN_STR
+`define KP_EN_STR 1
+`endif
 
     reg clk = 0, rst = 1;
     always #5 clk = ~clk;
@@ -31,6 +38,8 @@ module kp_tb;
     kp_core #(
         .UOP_FILE(`UOP_FILE), .LIT_FILE(`LIT_FILE), .STR_FILE(`STR_FILE),
         .STRTAB_FILE(`STRTAB_FILE), .MSTART_FILE(`MSTART_FILE), .MARITY_FILE(`MARITY_FILE),
+        .ISA_VERSION(KP_ISA_VERSION),
+        .G_EN_DEC(`KP_EN_DEC), .G_EN_STR(`KP_EN_STR),
         .N_UOPS(KP_N_UOPS), .LIT_BYTES(KP_LIT_BYTES), .STR_BYTES(KP_STR_BYTES),
         .N_STRINGS(KP_N_STRINGS), .N_MSGS(KP_N_MSGS), .ARGC_MAX(ARGC_MAX)
     ) dut (

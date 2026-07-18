@@ -150,16 +150,22 @@ checks the header at run time as described above.
   refused with **zero output handshakes** (a one-cycle drop bounce guarantees exactly
   one `msg_ready` pulse per presented message), the sticky `err` flag is set, and the
   engine returns to idle. It never hangs.
-- **Malformed µop** (reserved `op`): the message body is abandoned, `err` is set, and
-  the engine emits the **`out_last` end-of-message marker** (zero data bytes) before
-  returning to idle — observably different from the invalid-`msg_id` case, so a
-  consumer that counts message frames stays aligned.
+- **Malformed µop** (reserved `op`, **or a conversion for a feature disabled by a
+  `G_EN_*` gate** — e.g. a decimal FMT with `G_EN_DEC=0`, a STR with `G_EN_STR=0`): the
+  message body is abandoned, `err` is set, and the engine emits the **`out_last`
+  end-of-message marker** (zero data bytes) before returning to idle — observably
+  different from the invalid-`msg_id` case, so a consumer that counts message frames
+  stays aligned. (`k_fmtgen --disable` keeps a gated build's ROM from containing such a
+  µop in the first place; the run-time check is defense in depth.)
 - These paths are exercised by directed negative tests (`BAD_MSG`, ready-pulse-train,
   `BAD_UOP`, post-error recovery).
 
-## Deferred (Phase-3 hooks)
+## Front-/back-ends outside this ISA
 
-The runtime ASCII-format parser front-end, multi-source triggers/arbiter, capture
-(`snprintf`) sink and register-map/AXI front-ends are out of this ISA's scope — they
-sit in front of or behind the µop engine and do not change the encoding. `ll`/64-bit
+The multi-source triggers/arbiter (`kp_trig`), capture (`snprintf`) sink (`kp_capture`),
+tee (`kp_tee`) and the register-window front-end (`kp_regs`) sit in front of or behind
+the µop engine and **do not change the encoding** — they are implemented (both
+languages) as of v2.2.0. A runtime ASCII-format parser front-end and AXI-Lite/Wishbone
+shims over `kp_regs` remain optional/future and likewise would not touch the ISA.
+`ll`/64-bit
 and floating point are out of scope entirely (symmetric with the C library).

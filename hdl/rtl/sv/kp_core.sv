@@ -23,6 +23,13 @@ module kp_core #(
     parameter        MSTART_FILE = "msg_start.mem",
     parameter        MARITY_FILE = "msg_arity.mem",
     parameter int    ISA_VERSION = 2,
+    // opt-in feature gates (the K_PRINTF_ENABLE_* analogue): with a gate at 0
+    // the matching FSM branch becomes unreachable and synthesis prunes the
+    // datapath (double-dabble / string machinery). k_fmtgen --disable keeps
+    // the ROM consistent; a disabled uop reaching the core is treated as
+    // malformed (err), defense in depth.
+    parameter int    G_EN_DEC = 1,
+    parameter int    G_EN_STR = 1,
     parameter int    N_UOPS   = 90,
     parameter int    LIT_BYTES= 149,
     parameter int    STR_BYTES= 20,
@@ -112,15 +119,19 @@ module kp_core #(
     reg [5:0]  ddi;
     reg [31:0] pw_tmp;
 
-    // emit plan
+    // emit plan: the field is streamed phase-by-phase from counters (buffer-
+    // free - the C fmt_int layout without materializing the field), which is
+    // what lets kp_core synthesize (a byte buffer here explodes into muxes)
     reg [7:0]  sign_ch;            // 0 = none
     reg [1:0]  body_sel;           // 0=DIG 1=CHR 2=STR
     reg [7:0]  chr_byte;
     reg [15:0] str_addr;
     reg [7:0]  body_len;
-    // assembled output field (reference keeps a small buffer; <=80 bytes)
-    reg [7:0]  fld [0:95];
-    reg [7:0]  flen, fidx;
+    reg [7:0]  n_pre, n_zero, n_body, n_post;  // pending emit counts per phase
+    reg        do_sign;
+    reg [1:0]  n_pfx;
+    reg [7:0]  p0_r, p1_r;
+    reg [15:0] str_ptr;
 
     function [7:0] digit_ascii(input [3:0] v, input up);
         digit_ascii = (v < 4'd10) ? (8'h30 + v)
@@ -217,9 +228,13 @@ module kp_core #(
                         st <= S_LAYOUT;
                     end
                     default: begin  /* OP_STR */
-                        pw_tmp   <= arg_snap[s];   /* string-table id */
-                        body_sel <= 2'd2;
-                        st <= S_STRLD;
+                        if (G_EN_STR == 0) begin
+                            err <= 1'b1; st <= S_EOM;   // gated off: malformed
+                        end else begin
+                            pw_tmp   <= arg_snap[s];   /* string-table id */
+                            body_sel <= 2'd2;
+                            st <= S_STRLD;
+                        end
                     end
                     endcase
                 end
@@ -284,7 +299,11 @@ module kp_core #(
                     pw_tmp <= v; ndig <= 6'd0;
                     body_sel <= 2'd0;
                 end
-                st <= (base == B_DEC) ? S_DD : S_POW2;
+                if (base == B_DEC) begin
+                    if (G_EN_DEC == 0) begin
+                        err <= 1'b1; st <= S_EOM;       // gated off: malformed
+                    end else st <= S_DD;
+                end else st <= S_POW2;
             end
             // ------------------------------------------------------------
             S_DD: begin   // serial double-dabble: 32 iterations
@@ -342,7 +361,6 @@ module kp_core #(
                     reg is_zero; reg [1:0] pl; reg [7:0] p0, p1;
                     reg [7:0] nde, lz, blen, bl, pad; reg zero_ok, slen;
                     reg [7:0] presp, zp, postsp;
-                    integer j; reg [7:0] idx;
                     slen = (sign_ch != 0) ? 8'd1 : 8'd0;
                     is_zero = (body_sel == 2'd0) && (mag == 0);
                     // precision 0 with value 0 => no digits at all (C rule)
@@ -379,44 +397,53 @@ module kp_core #(
                     if (cflags[F_LEFT])   postsp = pad;
                     else if (zero_ok)     zp     = pad;
                     else                  presp  = pad;
-                    // fill buffer (constant-bound loops with guards: yosys needs
-                    // static trip counts; mirrors the VHDL twin exactly)
-                    idx = 0;
-                    for (j = 0; j < 64; j = j+1)
-                        if (j < presp) begin fld[idx] = 8'h20; idx = idx+1; end
-                    if (slen != 0) begin fld[idx] = sign_ch; idx = idx+1; end
-                    if (pl >= 1)   begin fld[idx] = p0; idx = idx+1; end
-                    if (pl == 2)   begin fld[idx] = p1; idx = idx+1; end
-                    for (j = 0; j < 128; j = j+1)
-                        if (j < zp + lz) begin fld[idx] = 8'h30; idx = idx+1; end
-                    if (body_sel == 2'd0) begin
-                        for (j = 0; j < 32; j = j+1)
-                            if (j < nde) begin fld[idx] = dig[nde-1-j[5:0]]; idx = idx+1; end
-                    end else if (body_sel == 2'd1) begin
-                        fld[idx] = chr_byte; idx = idx+1;
-                    end else begin
-                        for (j = 0; j < 64; j = j+1)
-                            if (j < blen) begin fld[idx] = str_pool[str_addr + j[15:0]]; idx = idx+1; end
-                    end
-                    for (j = 0; j < 64; j = j+1)
-                        if (j < postsp) begin fld[idx] = 8'h20; idx = idx+1; end
-                    flen = idx;
+                    // load the phase counters (no field buffer):
+                    // [pre spaces][sign][prefix][zeros: zpad+lead] body [post]
+                    n_pre  <= presp;
+                    do_sign<= (slen != 0);
+                    n_pfx  <= pl; p0_r <= p0; p1_r <= p1;
+                    n_zero <= zp + lz;
+                    n_body <= (body_sel == 2'd0) ? nde : blen;
+                    n_post <= postsp;
+                    str_ptr<= str_addr;
                 end
-                fidx <= 8'd0; out_valid <= 1'b0;
+                out_valid <= 1'b0;
                 st <= S_EMIT;
             end
             // ------------------------------------------------------------
             S_EMIT: begin
-                // stream fld[0..flen-1] with the clean valid/ready discipline
+                // stream the field phase-by-phase with the clean valid/ready
+                // discipline; digits come out MSB-first via dig[n_body-1]
                 if (!out_valid || out_ready) begin
-                    if (fidx >= flen) begin
-                        out_valid <= 1'b0; st <= S_FETCH;
-                    end else begin
-                        out_data  <= fld[fidx];
+                    out_last <= 1'b0;
+                    if (n_pre != 0) begin
+                        out_data <= 8'h20; out_valid <= 1'b1;
+                        n_pre <= n_pre - 8'd1; msg_len <= msg_len + 16'd1;
+                    end else if (do_sign) begin
+                        out_data <= sign_ch; out_valid <= 1'b1;
+                        do_sign <= 1'b0; msg_len <= msg_len + 16'd1;
+                    end else if (n_pfx != 0) begin
+                        out_data <= (n_pfx == 2'd2) ? p0_r : p1_r; out_valid <= 1'b1;
+                        n_pfx <= n_pfx - 2'd1; msg_len <= msg_len + 16'd1;
+                    end else if (n_zero != 0) begin
+                        out_data <= 8'h30; out_valid <= 1'b1;
+                        n_zero <= n_zero - 8'd1; msg_len <= msg_len + 16'd1;
+                    end else if (n_body != 0) begin
+                        case (body_sel)
+                        2'd0:    out_data <= dig[n_body - 8'd1];
+                        2'd1:    out_data <= chr_byte;
+                        default: begin
+                            out_data <= str_pool[str_ptr];
+                            str_ptr  <= str_ptr + 16'd1;
+                        end
+                        endcase
                         out_valid <= 1'b1;
-                        out_last  <= 1'b0;
-                        fidx      <= fidx + 8'd1;
-                        msg_len   <= msg_len + 16'd1;
+                        n_body <= n_body - 8'd1; msg_len <= msg_len + 16'd1;
+                    end else if (n_post != 0) begin
+                        out_data <= 8'h20; out_valid <= 1'b1;
+                        n_post <= n_post - 8'd1; msg_len <= msg_len + 16'd1;
+                    end else begin
+                        out_valid <= 1'b0; st <= S_FETCH;
                     end
                 end
             end

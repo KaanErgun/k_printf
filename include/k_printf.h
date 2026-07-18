@@ -28,12 +28,12 @@ extern "C" {
 /** @name Versioning (SemVer)
  *  @{ */
 #define K_PRINTF_VERSION_MAJOR 2
-#define K_PRINTF_VERSION_MINOR 1
+#define K_PRINTF_VERSION_MINOR 2
 #define K_PRINTF_VERSION_PATCH 0
 #define K_PRINTF_VERSION       (K_PRINTF_VERSION_MAJOR * 10000 + \
                                 K_PRINTF_VERSION_MINOR * 100   + \
-                                K_PRINTF_VERSION_PATCH)          /* 20100 */
-#define K_PRINTF_VERSION_STRING "2.1.0"   /* 2.1.0: repo-level (adds the HDL core);
+                                K_PRINTF_VERSION_PATCH)          /* 20200 */
+#define K_PRINTF_VERSION_STRING "2.2.0"   /* repo-level (HDL system features);
                                              no C behaviour changes since 2.0.0 */
 /** @} */
 

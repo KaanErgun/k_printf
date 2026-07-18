@@ -22,6 +22,9 @@ entity kp_core is
         MSTART_FILE : string  := "msg_start.mem";
         MARITY_FILE : string  := "msg_arity.mem";
         ISA_VERSION : integer := 2;
+        -- opt-in feature gates (K_PRINTF_ENABLE_* analogue, mirror of the SV)
+        G_EN_DEC    : integer := 1;
+        G_EN_STR    : integer := 1;
         N_UOPS      : integer := 90;
         LIT_BYTES   : integer := 149;
         STR_BYTES   : integer := 20;
@@ -113,7 +116,6 @@ architecture rtl of kp_core is
 
     type snap_t is array(0 to ARGC_MAX-1) of unsigned(31 downto 0);
     type dig_t  is array(0 to 31) of unsigned(7 downto 0);
-    type fld_t  is array(0 to 95) of unsigned(7 downto 0);
 
     function digit_ascii(v : unsigned(3 downto 0); up : std_logic) return unsigned is
         variable n : integer := to_integer(v);
@@ -153,9 +155,12 @@ architecture rtl of kp_core is
     signal chr_byte : unsigned(7 downto 0);
     signal str_addr : integer range 0 to 65535;
     signal body_len : integer range 0 to 255;
-    signal fld      : fld_t;
-    signal flen     : integer range 0 to 96;
-    signal fidx     : integer range 0 to 96;
+    -- buffer-free emit: pending counts per phase (mirror of the SV core)
+    signal n_pre, n_zero, n_body, n_post : integer range 0 to 255;
+    signal do_sign  : std_logic;
+    signal n_pfx    : integer range 0 to 2;
+    signal p0_r, p1_r : unsigned(7 downto 0);
+    signal str_ptr  : integer range 0 to 65535;
     signal ovalid   : std_logic := '0';
     signal olast    : std_logic := '0';
     signal odata    : unsigned(7 downto 0) := (others => '0');
@@ -199,7 +204,6 @@ begin
         variable pad      : integer;
         variable zero_ok  : boolean;
         variable presp, zp, postsp : integer;
-        variable idx      : integer;
         variable sid      : integer;
         variable te       : unsigned(31 downto 0);
     begin
@@ -254,11 +258,15 @@ begin
                 when S_RESOLVE =>
                     -- shared for FMT/CHR/STR: resolve '*'-sourced width and
                     -- precision from the leading arg slots ([w][p][value]) and
-                    -- latch effective flags/width/precision + value slot.
+                    -- latch effective flags/width/precision + value slot. All
+                    -- arg_snap reads mask the slot to the valid range (a
+                    -- malformed ROM could drive slotv past ARGC_MAX; the SV
+                    -- twin's 3-bit index wraps the same way instead of
+                    -- crashing the sim on an out-of-bounds read).
                     slotv := to_integer(uw(18 downto 16));
                     fl    := uw(9 downto 5);
                     if uw(26) = '1' then                 -- w_from_arg
-                        wa := arg_snap(slotv); slotv := slotv + 1;
+                        wa := arg_snap(slotv mod ARGC_MAX); slotv := slotv + 1;
                         if wa(31) = '1' then             -- negative '*' = LEFT
                             fl(F_LEFT) := '1';
                             cwidth <= sat63(0 - wa);
@@ -269,7 +277,7 @@ begin
                         cwidth <= to_integer(uw(15 downto 10));
                     end if;
                     if uw(27) = '1' then                 -- p_from_arg
-                        pa := arg_snap(slotv); slotv := slotv + 1;
+                        pa := arg_snap(slotv mod ARGC_MAX); slotv := slotv + 1;
                         if pa(31) = '1' then             -- negative '.*' = none
                             cpen <= '0'; cprec <= 0;
                         else
@@ -280,19 +288,23 @@ begin
                         cprec <= to_integer(uw(24 downto 19));
                     end if;
                     cflags  <= fl;
-                    vslot   <= slotv;
+                    vslot   <= slotv mod ARGC_MAX;
                     sign_ch <= (others => '0');
                     case uw(31 downto 29) is
                     when OP_FMT =>
                         st <= S_NUMSET;
                     when OP_CHR =>
-                        chr_byte <= arg_snap(slotv)(7 downto 0);
+                        chr_byte <= arg_snap(slotv mod ARGC_MAX)(7 downto 0);
                         body_sel <= 1; body_len <= 1;
                         st <= S_LAYOUT;
                     when others =>                        -- OP_STR
-                        pw_tmp   <= arg_snap(slotv);      -- string-table id
-                        body_sel <= 2;
-                        st <= S_STRLD;
+                        if G_EN_STR = 0 then
+                            errr <= '1'; st <= S_EOM;     -- gated off: malformed
+                        else
+                            pw_tmp   <= arg_snap(slotv mod ARGC_MAX);  -- str id
+                            body_sel <= 2;
+                            st <= S_STRLD;
+                        end if;
                     end case;
                 -- ----------------------------------------------------------
                 when S_LIT =>
@@ -342,7 +354,15 @@ begin
                     else sign_ch <= (others => '0'); end if;
                     bcd <= (others => '0'); ddbin <= v; ddi <= 0;
                     pw_tmp <= v; ndig <= 0; body_sel <= 0;
-                    if uw(1 downto 0) = B_DEC then st <= S_DD; else st <= S_POW2; end if;
+                    if uw(1 downto 0) = B_DEC then
+                        if G_EN_DEC = 0 then
+                            errr <= '1'; st <= S_EOM;     -- gated off: malformed
+                        else
+                            st <= S_DD;
+                        end if;
+                    else
+                        st <= S_POW2;
+                    end if;
                 -- ----------------------------------------------------------
                 when S_DD =>
                     if ddi = 32 then
@@ -429,43 +449,50 @@ begin
                     if cflags(F_LEFT) = '1' then postsp := pad;
                     elsif zero_ok then zp := pad;
                     else presp := pad; end if;
-                    idx := 0;
-                    for k in 0 to 63 loop
-                        if k < presp then fld(idx) <= x"20"; idx := idx + 1; end if;
-                    end loop;
-                    if slen = 1 then fld(idx) <= sign_ch; idx := idx + 1; end if;
-                    if pl >= 1 then fld(idx) <= p0; idx := idx + 1; end if;
-                    if pl = 2 then fld(idx) <= p1; idx := idx + 1; end if;
-                    for k in 0 to 127 loop
-                        if k < zp + lz then fld(idx) <= x"30"; idx := idx + 1; end if;
-                    end loop;
-                    if body_sel = 0 then
-                        for k in 0 to 31 loop
-                            if k < nde then fld(idx) <= dig(nde-1-k); idx := idx + 1; end if;
-                        end loop;
-                    elsif body_sel = 1 then
-                        fld(idx) <= chr_byte; idx := idx + 1;
-                    else
-                        for k in 0 to 63 loop
-                            if k < blen then fld(idx) <= str_pool(str_addr + k); idx := idx + 1; end if;
-                        end loop;
-                    end if;
-                    for k in 0 to 63 loop
-                        if k < postsp then fld(idx) <= x"20"; idx := idx + 1; end if;
-                    end loop;
-                    flen <= idx;
-                    fidx <= 0; ovalid <= '0';
+                    -- load the phase counters (buffer-free; mirror of the SV)
+                    n_pre  <= presp;
+                    if slen = 1 then do_sign <= '1'; else do_sign <= '0'; end if;
+                    n_pfx  <= pl; p0_r <= p0; p1_r <= p1;
+                    n_zero <= zp + lz;
+                    if body_sel = 0 then n_body <= nde; else n_body <= blen; end if;
+                    n_post <= postsp;
+                    str_ptr <= str_addr;
+                    ovalid <= '0';
                     st <= S_EMIT;
                 -- ----------------------------------------------------------
                 when S_EMIT =>
+                    -- stream the field phase-by-phase; digits MSB-first via
+                    -- dig(n_body-1)
                     if ovalid = '0' or out_ready = '1' then
-                        if fidx >= flen then
-                            ovalid <= '0'; st <= S_FETCH;
+                        olast <= '0';
+                        if n_pre /= 0 then
+                            odata <= x"20"; ovalid <= '1';
+                            n_pre <= n_pre - 1; mlen <= mlen + 1;
+                        elsif do_sign = '1' then
+                            odata <= sign_ch; ovalid <= '1';
+                            do_sign <= '0'; mlen <= mlen + 1;
+                        elsif n_pfx /= 0 then
+                            if n_pfx = 2 then odata <= p0_r; else odata <= p1_r; end if;
+                            ovalid <= '1';
+                            n_pfx <= n_pfx - 1; mlen <= mlen + 1;
+                        elsif n_zero /= 0 then
+                            odata <= x"30"; ovalid <= '1';
+                            n_zero <= n_zero - 1; mlen <= mlen + 1;
+                        elsif n_body /= 0 then
+                            case body_sel is
+                                when 0 => odata <= dig(n_body - 1);
+                                when 1 => odata <= chr_byte;
+                                when others =>
+                                    odata <= str_pool(str_ptr);
+                                    str_ptr <= str_ptr + 1;
+                            end case;
+                            ovalid <= '1';
+                            n_body <= n_body - 1; mlen <= mlen + 1;
+                        elsif n_post /= 0 then
+                            odata <= x"20"; ovalid <= '1';
+                            n_post <= n_post - 1; mlen <= mlen + 1;
                         else
-                            odata  <= fld(fidx);
-                            ovalid <= '1'; olast <= '0';
-                            fidx <= fidx + 1;
-                            mlen <= mlen + 1;
+                            ovalid <= '0'; st <= S_FETCH;
                         end if;
                     end if;
                 -- ----------------------------------------------------------

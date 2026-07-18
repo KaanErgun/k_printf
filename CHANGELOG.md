@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-07-18
+
+No C library behaviour changes — the bump covers the HDL Phase-3 system feature set.
+
+### HDL
+- **Buffer-free emit refactor**: the core streams each field phase-by-phase from
+  counters instead of materializing it — `kp_core` now synthesizes. Calibration
+  (yosys, iCE40): full **2349 SB_LUT4** + 1 BRAM, gated **1836**, UART 85. The
+  full-core number exceeds the plan's 900–1300 hypothesis; reduction levers are
+  documented as future work.
+- **`kp_trig`** (both languages): N-source hardware triggers with a one-cycle atomic
+  argument snapshot, round-robin message-granular arbiter, per-source saturating
+  `dropped_cnt` (DROP policy for hardware sources).
+- **`kp_capture`** (k_snprintf analogue) and **`kp_tee`** (two-sink broadcast,
+  the k_fprintf idea) sinks.
+- **`kp_regs`**: bus-agnostic register window — ARG0..7, **write-to-fire SEND**
+  (no set-id/go race), STATUS (pend/err/overflow). Generated **`k_printf_hw.h`**
+  C bridge (ids + arity + inline poll-then-fire sender) — softcore printf with the
+  format strings compiled out of firmware.
+- **Feature gates** `G_EN_DEC`/`G_EN_STR` (K_PRINTF_ENABLE_* analogue) + `k_fmtgen
+  --disable` + a config-matrix differential test with a reduced message set.
+- New local targets: `sim-sys-*`, `sim-regs-*`, `config-test`; test totals per run:
+  304+304 core, 12+12 UART, 53+53 system, 35+35 regs, 52 config — all vs the C golden.
+
 ## [2.1.0] - 2026-07-18
 
 No C library behaviour changes in this release — the version bump covers the new
